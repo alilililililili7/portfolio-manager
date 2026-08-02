@@ -24,13 +24,9 @@ tab1, tab2, tab3 = st.tabs(
 with tab1:
     col_left, col_right = st.columns([1, 2], gap="large")
 
-    # --------------------------------------
-    # LEFT COLUMN: INPUT PARAMETERS
-    # --------------------------------------
     with col_left:
         st.subheader("Varlık Dağılım Parametreleri")
 
-        # Default tickers from the interface
         ticker_input = st.text_input(
             "Varlık Ticker'ları (Virgülle ayır)",
             value="NVDA,LLY,JPM,AAPL,GOOG,CMND,GCTK,OTLK,INFQ",
@@ -51,19 +47,18 @@ with tab1:
 
         run_btn = st.button("Matematiksel Optimizasyonu Çalıştır")
 
-    # Parse Tickers
-    tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+    # Kullanıcı girdisini temizle ve tekrarları önle (Sırayı koru)
+    raw_tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
+    tickers = list(dict.fromkeys(raw_tickers))
 
-    if run_btn or len(tickers) > 0:
-        # --------------------------------------
-        # DATA FETCHING & CLEANING ENGINE
-        # --------------------------------------
+    if (run_btn or len(tickers) > 0) and len(tickers) > 0:
         try:
             # 5 Yıllık veri çek
             raw_data = yf.download(
                 tickers, period="5y", progress=False, auto_adjust=True
             )
 
+            # DataFrame Formatlama (MultiIndex veya Tekil)
             if isinstance(raw_data.columns, pd.MultiIndex):
                 if "Close" in raw_data.columns.levels[0]:
                     df_close = raw_data["Close"]
@@ -72,78 +67,81 @@ with tab1:
             else:
                 df_close = raw_data[["Close"]] if "Close" in raw_data else raw_data
 
-            df_close = df_close.dropna(how="all")
+            # yfinance alfabetik getirebilir, kullanıcının girdiği sıraya zorla!
+            valid_cols = [t for t in tickers if t in df_close.columns]
+            df_close = df_close[valid_cols]
 
-            # Ortak tarih penceresini bul (Inner Join)
+            # Ortak tarih kesişimi (Inner Join)
             df_common = df_close.dropna(how="any")
             common_days = len(df_common)
 
             # Logaritmik Getiriler
             log_returns = np.log(df_common / df_common.shift(1)).dropna()
 
-            # --------------------------------------
-            # RIGHT COLUMN: OUTPUTS & WARNINGS
-            # --------------------------------------
+            # Garantili Kolon Listesi (Sıralama Eşleşmesi İçin)
+            active_tickers = list(log_returns.columns)
+            n_assets = len(active_tickers)
+
             with col_right:
                 st.subheader("Kurumsal Risk ve Dağılım Çıktıları")
 
-                # Yeni Halka Arz (IPO) / Kısa Tarih Veri Uyarısı
+                # Halka Arz / Kısıtlı Tarih Uyarısı
                 if common_days < 1000:
                     st.warning(
                         f"⚠️ **Dikkat:** Portföydeki bazı varlıklar yeni halka arz olduğu için "
                         f"optimizasyon ortak olan son **{common_days} işlem günü** üzerinden hesaplanıyor."
                     )
 
-                # Yıllıklandırılmış Getiri ve Kovaryans Matrisi
-                mean_returns = log_returns.mean() * 252
-                cov_matrix = log_returns.cov() * 252
+                # Yıllıklandırılmış Getiri ve Kovaryans Matrisi (Pandas Series/DataFrame)
+                mean_returns_series = log_returns.mean() * 252
+                cov_matrix_df = log_returns.cov() * 252
 
-                n_assets = len(tickers)
                 rf_rate = risk_free_input / 100.0
 
-                # --------------------------------------
-                # ROBUST MATRIX OPTIMIZATION
-                # --------------------------------------
-                cov_matrix_vals = cov_matrix.values.copy()
+                # Matris Islemleri
+                cov_matrix_vals = cov_matrix_df.values.copy()
 
-                # L2 Ridge Penalty (Singular/Multicollinear Matris Çökmelerini Önler)
+                # Ridge Penalty (Çoklu doğrusallık ve tekilleşmeyi engeller)
                 cov_matrix_vals += np.eye(n_assets) * 1e-6
 
-                # Analitik Kovaryans Tersi (Pseudo-Inverse ile MPT Çözümü)
                 cov_inv = np.linalg.pinv(cov_matrix_vals)
-                excess_returns = (mean_returns - rf_rate).values
+                excess_returns = (mean_returns_series.values - rf_rate)
 
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # Kısa Pozisyon Yasağı (Long-Only Constraint Threshold: %0.01)
-                raw_weights = np.maximum(raw_weights, 0.0001)
-                opt_weights = raw_weights / np.sum(raw_weights)
+                # Long-Only Kısıtı (%0 Tabanı)
+                raw_weights = np.maximum(raw_weights, 0.0)
+                
+                # Toplam ağırlık 0 olursa eşit dağıt (Sıfıra bölünme koruması)
+                if np.sum(raw_weights) > 0:
+                    opt_weights = raw_weights / np.sum(raw_weights)
+                else:
+                    opt_weights = np.ones(n_assets) / n_assets
 
-                # --------------------------------------
-                # RISK & RETURN METRICS
-                # --------------------------------------
-                portfolio_return = np.sum(mean_returns * opt_weights)
+                # Portföy Metrikleri
+                portfolio_return = np.sum(mean_returns_series.values * opt_weights)
                 portfolio_volatility = np.sqrt(
                     np.dot(opt_weights.T, np.dot(cov_matrix_vals, opt_weights))
                 )
                 sharpe_ratio = (
-                    portfolio_return - rf_rate
-                ) / portfolio_volatility
+                    (portfolio_return - rf_rate) / portfolio_volatility
+                    if portfolio_volatility > 0
+                    else 0.0
+                )
 
-                # Bireysel Yıllık Volatiliteler
+                # Bireysel Yıllık Volatiliteler (Doğru Çapraz Eşleşme)
                 individual_vols = np.sqrt(np.diag(cov_matrix_vals))
 
-                # Marginal Contribution to Risk (MCR) & Risk Katkısı (%)
+                # Risk Katkısı (%) Hesaplaması
                 mcr = np.dot(cov_matrix_vals, opt_weights) / portfolio_volatility
-                risk_contribution_dollars = opt_weights * mcr
                 risk_contribution_pct = (
-                    risk_contribution_dollars / portfolio_volatility
+                    (opt_weights * mcr) / portfolio_volatility
                 ) * 100.0
 
-                # Tablo Oluşturma
+                # TABLO OLUŞTURMA (active_tickers garantisiyle satır kayması tamamen engellendi)
                 df_results = pd.DataFrame(
                     {
-                        "Varlık": tickers,
+                        "Varlık": active_tickers,
                         "Optimal Ağırlık (%)": np.round(opt_weights * 100, 2),
                         "Yıllık Volatilite (%)": np.round(
                             individual_vols * 100, 2
@@ -155,7 +153,7 @@ with tab1:
                 # Tabloyu Göster
                 st.dataframe(df_results, use_container_width=True, hide_index=False)
 
-                # Alt Metrik Kartları
+                # Alt Kartlar
                 st.write("---")
                 m_col1, m_col2, m_col3 = st.columns(3)
 
