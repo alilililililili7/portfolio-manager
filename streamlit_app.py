@@ -11,7 +11,6 @@ st.set_page_config(
     layout="wide",
 )
 
-# Oturum Durumu Kontrolü (Giriş ve Disclaimer)
 if "logged_in" not in st.session_state:
     st.session_state.logged_in = False
 if "disclaimer_accepted" not in st.session_state:
@@ -54,7 +53,7 @@ with tabs[0]:
     with col1:
         st.markdown("### Varlık Dağılım Parametreleri")
         tickers_input = st.text_input(
-            "Varlık Ticker'ları (Virgülle ayır)", "LLY, AVGO, BRK.B, JPM, WMT, MU, AMD"
+            "Varlık Ticker'ları (Virgülle ayır)", "LLY, AVGO, JPM, WMT, MU, AMD, NVDA"
         )
         risk_free_rate = st.number_input("Risk-Free Rate (%)", value=3.75) / 100.0
         optimization_model = st.selectbox(
@@ -70,50 +69,48 @@ with tabs[0]:
     with col2:
         st.markdown("### Kurumsal Risk ve Dağılım Çıktıları")
         if run_opt:
-            # Ticker formatlama (BRK-B -> BRK.B dönüşümü)
             tickers = [t.strip().upper().replace("-", ".") for t in tickers_input.split(",")]
             
             with st.spinner("Son 5 yıllık piyasa verileri Yahoo Finance üzerinden çekiliyor..."):
                 try:
                     # 5 Yıllık Veri Çekimi
-                    raw_data = yf.download(tickers, period="5y", interval="1d")["Close"]
+                    raw_data = yf.download(tickers, period="5y", interval="1d")
                     
-                    # Eksik verileri temizle
-                    df_close = raw_data.dropna()
-                    
-                    if df_close.empty or len(df_close.columns) == 0:
-                        st.error("Hisseler için geçerli fiyat verisi çekilemedi. Ticker'ları kontrol et.")
+                    if "Close" in raw_data.columns.levels[0]:
+                        df_close = raw_data["Close"]
                     else:
-                        # Günlük Getiriler
+                        df_close = raw_data
+                    
+                    # KRİTİK DÜZELTME: Ticker kolon sırasını girdimizle BİREBİR eşliyoruz
+                    df_close = df_close.reindex(columns=tickers).dropna()
+                    
+                    if df_close.empty or len(df_close.columns) < len(tickers):
+                        st.error("Bazı hisseler için fiyat verisi eksik veya çekilemedi.")
+                    else:
                         returns = df_close.pct_change().dropna()
                         
-                        # 5 Yıllık Veri Üzerinden Yıllıklandırılmış Kovaryans Matrisi ve Volatilite
+                        # Yıllıklandırılmış Metrikler
                         cov_matrix = returns.cov() * 252
                         annual_vols = np.sqrt(np.diagonal(cov_matrix))
-                        
-                        # 5 Yıllık Yıllıklandırılmış Ortalama Getiri
                         mean_returns = returns.mean() * 252
                         
                         n_assets = len(tickers)
 
                         def portfolio_performance(w):
-                            p_ret = np.sum(mean_returns * w)
-                            p_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
+                            p_ret = np.sum(mean_returns.values * w)
+                            p_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix.values, w)))
                             return p_ret, p_vol
 
                         if "Analitik Kovaryans Tersi" in optimization_model:
-                            # Matris Tersi Yöntemi: w* = Σ^(-1) * (R - Rf)
                             cov_inv = np.linalg.pinv(cov_matrix.values)
                             excess_returns = (mean_returns - risk_free_rate).values
                             
+                            # Lagrange Analitik Formülü: w = Σ^-1 * (R - Rf)
                             raw_weights = np.dot(cov_inv, excess_returns)
                             
-                            # Negatif (Short) pozisyonları sıfırlayıp re-normalize etme
-                            raw_weights = np.maximum(raw_weights, 0)
-                            if np.sum(raw_weights) > 0:
-                                opt_weights = raw_weights / np.sum(raw_weights)
-                            else:
-                                opt_weights = np.ones(n_assets) / n_assets
+                            # Negatifleri (Short) eleyip en az %1 sembolik pay bırakma (Zero-weight bug engelleme)
+                            raw_weights = np.maximum(raw_weights, 0.01)
+                            opt_weights = raw_weights / np.sum(raw_weights)
 
                         elif "Maximum Sharpe Ratio" in optimization_model:
                             def neg_sharpe(w):
@@ -121,7 +118,7 @@ with tabs[0]:
                                 return -(r - risk_free_rate) / v if v > 0 else 0
 
                             cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                            bnds = tuple((0.0, 1.0) for _ in range(n_assets))
+                            bnds = tuple((0.01, 1.0) for _ in range(n_assets))
                             init_w = n_assets * [1.0 / n_assets]
                             res = minimize(neg_sharpe, init_w, method='SLSQP', bounds=bnds, constraints=cons)
                             opt_weights = res.x
@@ -131,7 +128,7 @@ with tabs[0]:
                                 return portfolio_performance(w)[1]
 
                             cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                            bnds = tuple((0.0, 1.0) for _ in range(n_assets))
+                            bnds = tuple((0.01, 1.0) for _ in range(n_assets))
                             init_w = n_assets * [1.0 / n_assets]
                             res = minimize(port_vol, init_w, method='SLSQP', bounds=bnds, constraints=cons)
                             opt_weights = res.x
@@ -140,10 +137,10 @@ with tabs[0]:
                         final_ret, final_vol = portfolio_performance(opt_weights)
                         final_sharpe = (final_ret - risk_free_rate) / final_vol if final_vol > 0 else 0
 
-                        # Risk Katkısı (Marginal Contribution to Risk - MCR)
-                        port_variance = np.dot(opt_weights.T, np.dot(cov_matrix.values, opt_weights))
-                        marginal_contrib = np.dot(cov_matrix.values, opt_weights) / np.sqrt(port_variance)
-                        percentage_risk_contrib = (opt_weights * marginal_contrib) / np.sqrt(port_variance) * 100
+                        # Risk Katkısı (MCR)
+                        port_variance = final_vol ** 2
+                        marginal_contrib = np.dot(cov_matrix.values, opt_weights) / final_vol
+                        percentage_risk_contrib = (opt_weights * marginal_contrib) / final_vol * 100
 
                         results_df = pd.DataFrame(
                             {
