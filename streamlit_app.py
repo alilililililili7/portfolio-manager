@@ -1,6 +1,7 @@
 import streamlit as st
 import numpy as np
 import pandas as pd
+import yfinance as yf
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -62,7 +63,7 @@ tabs = st.tabs(
 
 with tabs[0]:
     st.subheader(
-        "Modern Portfolio Theory & Risk Parity Matrix (Stoklar, ETF'ler, Tahviller)"
+        "Modern Portfolio Theory & Risk Parity Matrix (Gerçek Piyasa Verisiyle)"
     )
 
     col1, col2 = st.columns([1, 2])
@@ -70,7 +71,7 @@ with tabs[0]:
     with col1:
         st.markdown("### Varlık Dağılım Parametreleri")
         tickers_input = st.text_input(
-            "Varlık Ticker'ları (Virgülle ayır)", "AAPL, MSFT, GOOGL, TLT, GLD"
+            "Varlık Ticker'ları (Virgülle ayır)", "AAPL, MSFT, GOOGL, TLT, LLY"
         )
         risk_free_rate = (
             st.number_input("Risk-Free Rate (%)", value=4.5) / 100.0
@@ -83,48 +84,77 @@ with tabs[0]:
                 "Risk Parity (All Weather Style)",
             ],
         )
-        run_opt = st.button("Matrisi Çalıştır & Optimize Et")
+        run_opt = st.button("Canlı Veriyi Çek & Optimize Et")
 
     with col2:
         st.markdown("### Kurumsal Risk ve Dağılım Çıktıları")
         if run_opt:
-            tickers = [t.strip() for t in tickers_input.split(",")]
-            np.random.seed(42)
-            n_assets = len(tickers)
+            tickers = [t.strip().upper() for t in tickers_input.split(",")]
+            
+            with st.spinner("Yahoo Finance üzerinden gerçek piyasa verileri çekiliyor ve kovaryans matrisi hesaplanıyor..."):
+                try:
+                    # Son 1 yıllık günlük kapanış verilerini çek
+                    data = yf.download(tickers, period="1y", interval="1d", progress=False)["Close"]
+                    
+                    if isinstance(data, pd.Series):
+                        data = data.to_frame()
+                    
+                    data = data.dropna(how="all")
+                    
+                    if data.empty or len(data.columns) == 0:
+                        st.error("Girilen ticker'lar için geçerli veri bulunamadı. Lütfen kontrol edin.")
+                    else:
+                        # Günlük getiriler ve yıllıklandırılmış kovaryans matrisi
+                        returns = data.pct_change().dropna()
+                        cov_matrix = returns.cov() * 252
+                        mean_returns = returns.mean() * 252
+                        
+                        n_assets = len(tickers)
+                        
+                        # Rastgele ağırlıklar yerine gerçek optimizasyon simülasyonu (Monte Carlo Tangency)
+                        best_sharpe = -999
+                        best_weights = np.ones(n_assets) / n_assets
+                        
+                        np.random.seed(None) # Rastgelekliği serbest bırak
+                        for _ in range(10000):
+                            w = np.random.random(n_assets)
+                            w /= np.sum(w)
+                            p_ret = np.dot(w, mean_returns)
+                            p_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
+                            p_sharpe = (p_ret - risk_free_rate) / p_vol if p_vol > 0 else 0
+                            if p_sharpe > best_sharpe:
+                                best_sharpe = p_sharpe
+                                best_weights = w
 
-            # Simüle edilmiş kurumsal veriler (Kovaryans ve Beklenen Getiri)
-            weights = np.random.dirichlet(np.ones(n_assets), size=1)[0]
-            weights = weights / np.sum(weights)
+                        # Sonuç DataFrame'i
+                        annual_volatilities = np.sqrt(np.diagonal(cov_matrix)) * 100
+                        
+                        results_df = pd.DataFrame(
+                            {
+                                "Varlık": tickers,
+                                "Optimal Ağırlık (%)": np.round(best_weights * 100, 2),
+                                "Yıllık Volatilite (%)": np.round(annual_volatilities, 2),
+                                "Risk Katkısı (%)": np.round(best_weights * 100, 2),
+                            }
+                        )
 
-            results_df = pd.DataFrame(
-                {
-                    "Varlık": tickers,
-                    "Optimal Ağırlık (%)": np.round(weights * 100, 2),
-                    "Yıllık Volatilite (%)": np.round(
-                        np.random.uniform(12, 35, n_assets), 2
-                    ),
-                    "Risk Katkısı (%)": np.round(weights * 100, 2),
-                }
-            )
+                        st.dataframe(results_df, use_container_width=True)
 
-            st.dataframe(results_df, use_container_width=True)
+                        # Portföy Metrikleri
+                        final_p_ret = np.dot(best_weights, mean_returns) * 100
+                        final_p_vol = np.sqrt(np.dot(best_weights.T, np.dot(cov_matrix, best_weights))) * 100
+                        final_sharpe = (final_p_ret/100 - risk_free_rate) / (final_p_vol/100)
 
-            # Metrik Kartları
-            m1, m2, m3 = st.columns(3)
-            m1.metric(
-                "Beklenen Portföy Getirisi",
-                f"%{np.random.uniform(14, 22):.2f}",
-            )
-            m2.metric(
-                "Portföy Volatilitesi (Risk)",
-                f"%{np.random.uniform(10, 18):.2f}",
-            )
-            m3.metric(
-                "Sharpe Oranı", f"{np.random.uniform(1.2, 2.1):.2f}"
-            )
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("Beklenen Portföy Getirisi", f"%{final_p_ret:.2f}")
+                        m2.metric("Portföy Volatilitesi (Risk)", f"%{final_p_vol:.2f}")
+                        m3.metric("Sharpe Oranı", f"{final_sharpe:.2f}")
+
+                except Exception as e:
+                    st.error(f"Veri çekme veya optimizasyon sırasında hata oluştu: {e}")
         else:
             st.info(
-                "Parametreleri belirleyip 'Matrisi Çalıştır & Optimize Et' butonuna basarak kovaryans ve ağırlık hesaplamalarını başlat."
+                "Ticker'ları girip 'Canlı Veriyi Çek & Optimize Et' butonuna basarak Yahoo Finance verileriyle gerçek optimizasyonu başlat."
             )
 
 with tabs[1]:
