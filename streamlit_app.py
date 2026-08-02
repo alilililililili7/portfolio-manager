@@ -108,27 +108,23 @@ with tabs[0]:
                         mean_returns = returns.mean() * 252
                         n_assets = len(tickers)
                         
-                        # Portföy performans fonksiyonları
                         def portfolio_performance(weights):
                             p_ret = np.sum(mean_returns * weights)
                             p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
                             return p_ret, p_vol
 
-                        # Negatif Sharpe (Maximize etmek için minimize edeceğiz)
                         def neg_sharpe_ratio(weights):
                             p_ret, p_vol = portfolio_performance(weights)
                             if p_vol == 0:
                                 return 0
                             return -(p_ret - risk_free_rate) / p_vol
 
-                        # Minimum Volatilite
                         def portfolio_volatility(weights):
                             return portfolio_performance(weights)[1]
 
-                        # Sınırlar ve kısıtlar (Ağırlıklar toplamı 1, her biri 0 ile 1 arasında)
                         constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
                         bounds = tuple((0.0, 1.0) for _ in range(n_assets))
-                        init_guess = n_assets * [1..0 / n_assets]
+                        init_guess = n_assets * [1.0 / n_assets]
 
                         if "Maximum Sharpe" in optimization_model:
                             result = minimize(neg_sharpe_ratio, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
@@ -137,7 +133,6 @@ with tabs[0]:
 
                         opt_weights = result.x
                         
-                        # Marjinal Risk Katkısı (Marginal Risk Contribution) hesaplama
                         portfolio_vol = portfolio_performance(opt_weights)[1]
                         marginal_contrib = np.dot(cov_matrix, opt_weights) / portfolio_vol if portfolio_vol > 0 else np.zeros(n_assets)
                         risk_contrib = opt_weights * marginal_contrib
@@ -154,7 +149,6 @@ with tabs[0]:
 
                         st.dataframe(results_df, use_container_width=True)
 
-                        # Nihai Portföy Metrikleri
                         final_ret, final_vol = portfolio_performance(opt_weights)
                         final_sharpe = (final_ret - risk_free_rate) / final_vol if final_vol > 0 else 0
 
