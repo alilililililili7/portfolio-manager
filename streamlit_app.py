@@ -1,175 +1,175 @@
-import streamlit as st
 import numpy as np
 import pandas as pd
+import streamlit as st
 import yfinance as yf
-from scipy.optimize import minimize
 
+# ==========================================
+# PAGE CONFIGURATION
+# ==========================================
 st.set_page_config(
-    page_title="Global Multi-Asset Portfolio Manager",
-    page_icon="🐆",
+    page_title="Modern Portfolio Theory Engine",
     layout="wide",
+    initial_sidebar_state="collapsed",
 )
 
-# --- Session State Kontrolleri ---
-if "logged_in" not in st.session_state:
-    st.session_state.logged_in = False
-if "disclaimer_accepted" not in st.session_state:
-    st.session_state.disclaimer_accepted = False
+st.title("Modern Portfolio Theory & Robust Matrix Optimization Engine")
 
-# 1. Login Ekranı
-if not st.session_state.logged_in:
-    st.title("🔐 Login / Register")
-    email = st.text_input("Email Address")
-    password = st.text_input("Password", type="password")
-    if st.button("Sign In"):
-        if email and password:
-            st.session_state.logged_in = True
-            st.rerun()
-        else:
-            st.warning("Lütfen e-posta ve şifre girin.")
-    st.stop()
+# ==========================================
+# TAB NAVIGATION
+# ==========================================
+tab1, tab2, tab3 = st.tabs(
+    ["Portfolio Optimization (MPT)", "Alternative Assets (PE & VC)", "Settings"]
+)
 
-# 2. Yasal Uyarı Ekranı
-if not st.session_state.disclaimer_accepted:
-    st.title("⚠️ Legal Disclaimer & Terms of Use")
-    st.info("Bu platformdaki optimizasyonlar eğitim amaçlıdır. Yatırım tavsiyesi değildir.")
-    accepted = st.checkbox("Şartları kabul ediyorum.")
-    if st.button("Agree & Enter App"):
-        if accepted:
-            st.session_state.disclaimer_accepted = True
-            st.rerun()
-        else:
-            st.error("Devam etmek için şartları kabul etmelisin.")
-    st.stop()
+with tab1:
+    col_left, col_right = st.columns([1, 2], gap="large")
 
-# --- Ana Uygulama ---
-st.title("🐆 Global Multi-Asset Portfolio Manager")
+    # --------------------------------------
+    # LEFT COLUMN: INPUT PARAMETERS
+    # --------------------------------------
+    with col_left:
+        st.subheader("Varlık Dağılım Parametreleri")
 
-tabs = st.tabs(["Portfolio Optimization (MPT)", "Alternative Assets (PE & VC)", "Settings"])
-
-with tabs[0]:
-    st.subheader("Modern Portfolio Theory & Robust Matrix Optimization Engine")
-
-    col1, col2 = st.columns([1, 2])
-
-    with col1:
-        st.markdown("### Varlık Dağılım Parametreleri")
-        tickers_input = st.text_input(
-            "Varlık Ticker'ları (Virgülle ayır)", "OTLK, INFQ, IONQ, QUBT, MU, CMND, GCTK, DFNS"
+        # Default tickers from the interface
+        ticker_input = st.text_input(
+            "Varlık Ticker'ları (Virgülle ayır)",
+            value="NVDA,LLY,JPM,AAPL,GOOG,CMND,GCTK,OTLK,INFQ",
         )
-        risk_free_rate = st.number_input("Risk-Free Rate (%)", value=3.75) / 100.0
-        optimization_model = st.selectbox(
+
+        risk_free_input = st.number_input(
+            "Risk-Free Rate (%)",
+            min_value=0.0,
+            max_value=20.0,
+            value=3.75,
+            step=0.25,
+        )
+
+        opt_model = st.selectbox(
             "Optimizasyon Modeli",
-            [
-                "Analitik Kovaryans Tersi (Lagrange Exact Solution)",
-                "Maximum Sharpe Ratio (Bounded SLSQP)",
-                "Minimum Volatility (Global Minimum Variance)",
-            ],
+            options=["Analitik Kovaryans Tersi (Lagrange Exact Solution)"],
         )
-        run_opt = st.button("Matematiksel Optimizasyonu Çalıştır")
 
-    with col2:
-        st.markdown("### Kurumsal Risk ve Dağılım Çıktıları")
-        if run_opt:
-            tickers = [t.strip().upper().replace("-", ".") for t in tickers_input.split(",")]
-            
-            with st.spinner("Son 5 yıllık piyasa verileri çekiliyor ve zaman pencereleri hizalanıyor..."):
-                try:
-                    raw_data = yf.download(tickers, period="5y", interval="1d")
-                    
-                    if "Close" in raw_data.columns.levels[0]:
-                        df_close = raw_data["Close"]
-                    else:
-                        df_close = raw_data
-                    
-                    # Kolon Hizasını Sabitle
-                    df_close = df_close.reindex(columns=tickers)
-                    
-                    # DYNAMIC COMMON-DATE ALIGNMENT
-                    # Yeni halka arz olan hisselerin NaN satırlarını ve ortak olmayan tarihleri temizle
-                    df_close = df_close.dropna(how="any")
-                    
-                    trading_days = len(df_close)
-                    
-                    if df_close.empty or len(df_close.columns) < len(tickers):
-                        st.error("Veri çekim hatası: Girilen ticker'lardan biri için veri bulunamadı veya kesişim tarihi yok.")
-                    else:
-                        if trading_days < 252:
-                            st.warning(f"⚠️ Dikkat: Portföydeki bazı varlıklar yeni halka arz olduğu için optimizasyon ortak olan son {trading_days} işlem günü üzerinden hesaplanıyor.")
-                        
-                        # 1. LOGARİTMİK GETİRİ (Penny stock / aşırı sapma törpüleme)
-                        log_returns = np.log(df_close / df_close.shift(1)).dropna()
-                        
-                        # 2. OUTLIER WINSORIZATION (Aşırı %50+ sıçramaları sınırlama)
-                        log_returns = log_returns.clip(lower=-0.50, upper=0.50)
-                        
-                        # 3. YILLIKLANDIRILMIŞ METRİKLER (Ortak Zaman Penceresi Üzerinden)
-                        cov_matrix = log_returns.cov() * 252
-                        annual_vols = np.sqrt(np.diagonal(cov_matrix))
-                        mean_returns = log_returns.mean() * 252
-                        
-                        n_assets = len(tickers)
+        run_btn = st.button("Matematiksel Optimizasyonu Çalıştır")
 
-                        def portfolio_performance(w):
-                            p_ret = np.sum(mean_returns.values * w)
-                            p_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix.values, w)))
-                            return p_ret, p_vol
+    # Parse Tickers
+    tickers = [t.strip().upper() for t in ticker_input.split(",") if t.strip()]
 
-                        # Optimizasyon Modelleri
-                        if "Analitik Kovaryans Tersi" in optimization_model:
-                            cov_inv = np.linalg.pinv(cov_matrix.values)
-                            excess_returns = (mean_returns - risk_free_rate).values
-                            
-                            raw_weights = np.dot(cov_inv, excess_returns)
-                            
-                            # Short pozisyonları sıfırla ve ağırlıkları normalize et
-                            raw_weights = np.maximum(raw_weights, 0.001)
-                            opt_weights = raw_weights / np.sum(raw_weights)
+    if run_btn or len(tickers) > 0:
+        # --------------------------------------
+        # DATA FETCHING & CLEANING ENGINE
+        # --------------------------------------
+        try:
+            # 5 Yıllık veri çek
+            raw_data = yf.download(
+                tickers, period="5y", progress=False, auto_adjust=True
+            )
 
-                        elif "Maximum Sharpe Ratio" in optimization_model:
-                            def neg_sharpe(w):
-                                r, v = portfolio_performance(w)
-                                return -(r - risk_free_rate) / v if v > 0 else 0
+            if isinstance(raw_data.columns, pd.MultiIndex):
+                if "Close" in raw_data.columns.levels[0]:
+                    df_close = raw_data["Close"]
+                else:
+                    df_close = raw_data.xs("Close", axis=1, level=0)
+            else:
+                df_close = raw_data[["Close"]] if "Close" in raw_data else raw_data
 
-                            cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                            bnds = tuple((0.0, 1.0) for _ in range(n_assets))
-                            init_w = n_assets * [1.0 / n_assets]
-                            res = minimize(neg_sharpe, init_w, method='SLSQP', bounds=bnds, constraints=cons)
-                            opt_weights = res.x
+            df_close = df_close.dropna(how="all")
 
-                        else:  # Minimum Volatility
-                            def port_vol(w):
-                                return portfolio_performance(w)[1]
+            # Ortak tarih penceresini bul (Inner Join)
+            df_common = df_close.dropna(how="any")
+            common_days = len(df_common)
 
-                            cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                            bnds = tuple((0.0, 1.0) for _ in range(n_assets))
-                            init_w = n_assets * [1.0 / n_assets]
-                            res = minimize(port_vol, init_w, method='SLSQP', bounds=bnds, constraints=cons)
-                            opt_weights = res.x
+            # Logaritmik Getiriler
+            log_returns = np.log(df_common / df_common.shift(1)).dropna()
 
-                        # Portföy Sonuç Metrikleri
-                        final_ret, final_vol = portfolio_performance(opt_weights)
-                        final_sharpe = (final_ret - risk_free_rate) / final_vol if final_vol > 0 else 0
+            # --------------------------------------
+            # RIGHT COLUMN: OUTPUTS & WARNINGS
+            # --------------------------------------
+            with col_right:
+                st.subheader("Kurumsal Risk ve Dağılım Çıktıları")
 
-                        # Risk Katkısı (Marginal Contribution to Risk)
-                        marginal_contrib = np.dot(cov_matrix.values, opt_weights) / final_vol if final_vol > 0 else np.zeros(n_assets)
-                        percentage_risk_contrib = (opt_weights * marginal_contrib) / final_vol * 100 if final_vol > 0 else np.zeros(n_assets)
+                # Yeni Halka Arz (IPO) / Kısa Tarih Veri Uyarısı
+                if common_days < 1000:
+                    st.warning(
+                        f"⚠️ **Dikkat:** Portföydeki bazı varlıklar yeni halka arz olduğu için "
+                        f"optimizasyon ortak olan son **{common_days} işlem günü** üzerinden hesaplanıyor."
+                    )
 
-                        results_df = pd.DataFrame(
-                            {
-                                "Varlık": tickers,
-                                "Optimal Ağırlık (%)": np.round(opt_weights * 100, 2),
-                                "Yıllık Volatilite (%)": np.round(annual_vols * 100, 2),
-                                "Risk Katkısı (%)": np.round(percentage_risk_contrib, 2),
-                            }
-                        )
+                # Yıllıklandırılmış Getiri ve Kovaryans Matrisi
+                mean_returns = log_returns.mean() * 252
+                cov_matrix = log_returns.cov() * 252
 
-                        st.dataframe(results_df, use_container_width=True)
+                n_assets = len(tickers)
+                rf_rate = risk_free_input / 100.0
 
-                        m1, m2, m3 = st.columns(3)
-                        m1.metric("Beklenen Portföy Getirisi", f"%{final_ret * 100:.2f}")
-                        m2.metric("Portföy Volatilitesi (Risk)", f"%{final_vol * 100:.2f}")
-                        m3.metric("Sharpe Oranı", f"{final_sharpe:.2f}")
+                # --------------------------------------
+                # ROBUST MATRIX OPTIMIZATION
+                # --------------------------------------
+                cov_matrix_vals = cov_matrix.values.copy()
 
-                except Exception as e:
-                    st.error(f"Optimizasyon hesaplama hatası: {e}")
+                # L2 Ridge Penalty (Singular/Multicollinear Matris Çökmelerini Önler)
+                cov_matrix_vals += np.eye(n_assets) * 1e-6
+
+                # Analitik Kovaryans Tersi (Pseudo-Inverse ile MPT Çözümü)
+                cov_inv = np.linalg.pinv(cov_matrix_vals)
+                excess_returns = (mean_returns - rf_rate).values
+
+                raw_weights = np.dot(cov_inv, excess_returns)
+
+                # Kısa Pozisyon Yasağı (Long-Only Constraint Threshold: %0.01)
+                raw_weights = np.maximum(raw_weights, 0.0001)
+                opt_weights = raw_weights / np.sum(raw_weights)
+
+                # --------------------------------------
+                # RISK & RETURN METRICS
+                # --------------------------------------
+                portfolio_return = np.sum(mean_returns * opt_weights)
+                portfolio_volatility = np.sqrt(
+                    np.dot(opt_weights.T, np.dot(cov_matrix_vals, opt_weights))
+                )
+                sharpe_ratio = (
+                    portfolio_return - rf_rate
+                ) / portfolio_volatility
+
+                # Bireysel Yıllık Volatiliteler
+                individual_vols = np.sqrt(np.diag(cov_matrix_vals))
+
+                # Marginal Contribution to Risk (MCR) & Risk Katkısı (%)
+                mcr = np.dot(cov_matrix_vals, opt_weights) / portfolio_volatility
+                risk_contribution_dollars = opt_weights * mcr
+                risk_contribution_pct = (
+                    risk_contribution_dollars / portfolio_volatility
+                ) * 100.0
+
+                # Tablo Oluşturma
+                df_results = pd.DataFrame(
+                    {
+                        "Varlık": tickers,
+                        "Optimal Ağırlık (%)": np.round(opt_weights * 100, 2),
+                        "Yıllık Volatilite (%)": np.round(
+                            individual_vols * 100, 2
+                        ),
+                        "Risk Katkısı (%)": np.round(risk_contribution_pct, 2),
+                    }
+                )
+
+                # Tabloyu Göster
+                st.dataframe(df_results, use_container_width=True, hide_index=False)
+
+                # Alt Metrik Kartları
+                st.write("---")
+                m_col1, m_col2, m_col3 = st.columns(3)
+
+                with m_col1:
+                    st.caption("Beklenen Portföy Getirisi")
+                    st.markdown(f"### %{portfolio_return * 100:.2f}")
+
+                with m_col2:
+                    st.caption("Portföy Volatilitesi (Risk)")
+                    st.markdown(f"### %{portfolio_volatility * 100:.2f}")
+
+                with m_col3:
+                    st.caption("Sharpe Oranı")
+                    st.markdown(f"### {sharpe_ratio:.2f}")
+
+        except Exception as e:
+            st.error(f"Hesaplama sırasında bir hata oluştu: {str(e)}")
