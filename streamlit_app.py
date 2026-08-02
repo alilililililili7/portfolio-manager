@@ -64,7 +64,7 @@ tabs = st.tabs(
 
 with tabs[0]:
     st.subheader(
-        "Modern Portfolio Theory & SciPy SLSQP Optimization Engine"
+        "Modern Portfolio Theory & Matrix Inverse Optimization Engine"
     )
 
     col1, col2 = st.columns([1, 2])
@@ -72,15 +72,16 @@ with tabs[0]:
     with col1:
         st.markdown("### Varlık Dağılım Parametreleri")
         tickers_input = st.text_input(
-            "Varlık Ticker'ları (Virgülle ayır)", "AAPL, MSFT, GOOGL, TLT, NVDA"
+            "Varlık Ticker'ları (Virgülle ayır)", "LLY, AVGO, BRK-B, JPM, WMT, MU, AMD"
         )
         risk_free_rate = (
-            st.number_input("Risk-Free Rate (%)", value=4.5) / 100.0
+            st.number_input("Risk-Free Rate (%)", value=3.75) / 100.0
         )
         optimization_model = st.selectbox(
             "Optimizasyon Modeli",
             [
-                "Maximum Sharpe Ratio (Tangency Portfolio)",
+                "Analitik Kovaryans Tersi (Lagrange Exact Solution)",
+                "Maximum Sharpe Ratio (Bounded SLSQP)",
                 "Minimum Volatility (Global Minimum Variance)",
             ],
         )
@@ -91,7 +92,7 @@ with tabs[0]:
         if run_opt:
             tickers = [t.strip().upper() for t in tickers_input.split(",")]
             
-            with st.spinner("Piyasa verileri işleniyor ve SLSQP matrisi hesaplanıyor..."):
+            with st.spinner("Piyasa verileri işleniyor ve matris analizi hesaplanıyor..."):
                 try:
                     data = yf.download(tickers, period="1y", interval="1d", progress=False)
                     
@@ -108,11 +109,11 @@ with tabs[0]:
                     data = data.dropna(how="all")
                     
                     if data.empty or len(data.columns) < len(tickers):
-                        st.warning("⚠️ Yahoo Finance veri akışında kısıtlama algılandı. Kurumsal risk modeli tahmini piyasa parametreleriyle devreye alındı.")
+                        st.warning("⚠️ Yahoo Finance veri akışında kısıtlama algılandı. Sentetik matris devreye alındı.")
                         np.random.seed(42)
-                        mean_returns = np.random.uniform(0.10, 0.25, len(tickers))
-                        vols = np.random.uniform(0.15, 0.35, len(tickers))
-                        cov_matrix = np.outer(vols, vols) * np.random.uniform(0.2, 0.6, (len(tickers), len(tickers)))
+                        mean_returns = np.array([0.38, 0.35, 0.155, 0.20, 0.15, 0.28, 0.22][:len(tickers)])
+                        vols = np.array([0.225, 0.27, 0.14, 0.185, 0.145, 0.38, 0.42][:len(tickers)])
+                        cov_matrix = np.outer(vols, vols) * 0.3
                         np.fill_diagonal(cov_matrix, vols**2)
                     else:
                         returns = data.pct_change().dropna()
@@ -126,28 +127,40 @@ with tabs[0]:
                         p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
                         return p_ret, p_vol
 
-                    def neg_sharpe_ratio(weights):
-                        p_ret, p_vol = portfolio_performance(weights)
-                        if p_vol == 0:
-                            return 0
-                        return -(p_ret - risk_free_rate) / p_vol
+                    if "Analitik Kovaryans Tersi" in optimization_model:
+                        # Resimdeki 3. Adım: w* = Σ^(-1) * (R - Rf) / 1^T * Σ^(-1) * (R - Rf)
+                        cov_inv = np.linalg.pinv(cov_matrix)
+                        excess_returns = mean_returns - risk_free_rate
+                        
+                        raw_weights = np.dot(cov_inv, excess_returns)
+                        
+                        # Açığa satışı engellemek için negatif ağırlıkları temizleyip normalize ediyoruz
+                        raw_weights = np.maximum(raw_weights, 0.01)
+                        opt_weights = raw_weights / np.sum(raw_weights)
+                        
+                    elif "Maximum Sharpe Ratio" in optimization_model:
+                        def neg_sharpe_ratio(weights):
+                            p_ret, p_vol = portfolio_performance(weights)
+                            if p_vol == 0:
+                                return 0
+                            return -(p_ret - risk_free_rate) / p_vol
 
-                    def portfolio_volatility(weights):
-                        return portfolio_performance(weights)[1]
+                        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+                        bounds = tuple((0.01, 1.0) for _ in range(n_assets))
+                        init_guess = n_assets * [1.0 / n_assets]
 
-                    # Ağırlıkların toplamı 1 olacak kısıt
-                    constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                    
-                    # Her varlık için minimum %1 (0.01) sınır koyuyoruz
-                    bounds = tuple((0.01, 1.0) for _ in range(n_assets))
-                    init_guess = n_assets * [1.0 / n_assets]
-
-                    if "Maximum Sharpe" in optimization_model:
                         result = minimize(neg_sharpe_ratio, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+                        opt_weights = result.x
                     else:
-                        result = minimize(portfolio_volatility, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+                        def portfolio_volatility(weights):
+                            return portfolio_performance(weights)[1]
 
-                    opt_weights = result.x
+                        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+                        bounds = tuple((0.01, 1.0) for _ in range(n_assets))
+                        init_guess = n_assets * [1.0 / n_assets]
+
+                        result = minimize(portfolio_volatility, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+                        opt_weights = result.x
                     
                     portfolio_vol = portfolio_performance(opt_weights)[1]
                     marginal_contrib = np.dot(cov_matrix, opt_weights) / portfolio_vol if portfolio_vol > 0 else np.zeros(n_assets)
@@ -179,7 +192,7 @@ with tabs[0]:
                     st.error(f"Optimizasyon motoru hatası: {e}")
         else:
             st.info(
-                "Ticker'ları girip 'Matematiksel Optimizasyonu Çalıştır' butonuna basarak SLSQP motorunu ateşle."
+                "Ticker'ları girip 'Matematiksel Optimizasyonu Çalıştır' butonuna basarak matris motorunu ateşle."
             )
 
 with tabs[1]:
