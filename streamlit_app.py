@@ -95,7 +95,6 @@ with tabs[0]:
                 try:
                     data = yf.download(tickers, period="1y", interval="1d", progress=False)
                     
-                    # Çoklu veya tekli ticker durumuna göre Close sütununu güvenli çek
                     if isinstance(data.columns, pd.MultiIndex):
                         if "Close" in data.columns.levels[0]:
                             data = data["Close"]
@@ -108,7 +107,6 @@ with tabs[0]:
                     
                     data = data.dropna(how="all")
                     
-                    # Eğer veri hala boşsa veya eksik kolon varsa simüle edilmiş kurumsal matrise düş (Fallback)
                     if data.empty or len(data.columns) < len(tickers):
                         st.warning("⚠️ Yahoo Finance veri akışında kısıtlama algılandı. Kurumsal risk modeli tahmini piyasa parametreleriyle devreye alındı.")
                         np.random.seed(42)
@@ -137,8 +135,11 @@ with tabs[0]:
                     def portfolio_volatility(weights):
                         return portfolio_performance(weights)[1]
 
+                    # Ağırlıkların toplamı 1 olacak kısıt
                     constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
-                    bounds = tuple((0.0, 1.0) for _ in range(n_assets))
+                    
+                    # Her varlık için minimum %1 (0.01) sınır koyuyoruz
+                    bounds = tuple((0.01, 1.0) for _ in range(n_assets))
                     init_guess = n_assets * [1.0 / n_assets]
 
                     if "Maximum Sharpe" in optimization_model:
