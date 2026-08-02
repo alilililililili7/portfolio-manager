@@ -2,6 +2,7 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 import yfinance as yf
+from scipy.optimize import minimize
 
 # Sayfa Yapılandırması
 st.set_page_config(
@@ -63,7 +64,7 @@ tabs = st.tabs(
 
 with tabs[0]:
     st.subheader(
-        "Modern Portfolio Theory & Risk Parity Matrix (Gerçek Piyasa Verisiyle)"
+        "Modern Portfolio Theory & SciPy SLSQP Optimization Engine"
     )
 
     col1, col2 = st.columns([1, 2])
@@ -71,7 +72,7 @@ with tabs[0]:
     with col1:
         st.markdown("### Varlık Dağılım Parametreleri")
         tickers_input = st.text_input(
-            "Varlık Ticker'ları (Virgülle ayır)", "AAPL, MSFT, GOOGL, TLT, LLY"
+            "Varlık Ticker'ları (Virgülle ayır)", "AAPL, MSFT, GOOGL, TLT, NVDA"
         )
         risk_free_rate = (
             st.number_input("Risk-Free Rate (%)", value=4.5) / 100.0
@@ -81,19 +82,17 @@ with tabs[0]:
             [
                 "Maximum Sharpe Ratio (Tangency Portfolio)",
                 "Minimum Volatility (Global Minimum Variance)",
-                "Risk Parity (All Weather Style)",
             ],
         )
-        run_opt = st.button("Canlı Veriyi Çek & Optimize Et")
+        run_opt = st.button("Matematiksel Optimizasyonu Çalıştır")
 
     with col2:
         st.markdown("### Kurumsal Risk ve Dağılım Çıktıları")
         if run_opt:
             tickers = [t.strip().upper() for t in tickers_input.split(",")]
             
-            with st.spinner("Yahoo Finance üzerinden gerçek piyasa verileri çekiliyor ve kovaryans matrisi hesaplanıyor..."):
+            with st.spinner("Yahoo Finance verileri çekiliyor ve SciPy SLSQP matrisi hesaplanıyor..."):
                 try:
-                    # Son 1 yıllık günlük kapanış verilerini çek
                     data = yf.download(tickers, period="1y", interval="1d", progress=False)["Close"]
                     
                     if isinstance(data, pd.Series):
@@ -102,59 +101,73 @@ with tabs[0]:
                     data = data.dropna(how="all")
                     
                     if data.empty or len(data.columns) == 0:
-                        st.error("Girilen ticker'lar için geçerli veri bulunamadı. Lütfen kontrol edin.")
+                        st.error("Girilen ticker'lar için geçerli veri bulunamadı. Ticker'ları kontrol edin.")
                     else:
-                        # Günlük getiriler ve yıllıklandırılmış kovaryans matrisi
                         returns = data.pct_change().dropna()
                         cov_matrix = returns.cov() * 252
                         mean_returns = returns.mean() * 252
-                        
                         n_assets = len(tickers)
                         
-                        # Rastgele ağırlıklar yerine gerçek optimizasyon simülasyonu (Monte Carlo Tangency)
-                        best_sharpe = -999
-                        best_weights = np.ones(n_assets) / n_assets
-                        
-                        np.random.seed(None) # Rastgelekliği serbest bırak
-                        for _ in range(10000):
-                            w = np.random.random(n_assets)
-                            w /= np.sum(w)
-                            p_ret = np.dot(w, mean_returns)
-                            p_vol = np.sqrt(np.dot(w.T, np.dot(cov_matrix, w)))
-                            p_sharpe = (p_ret - risk_free_rate) / p_vol if p_vol > 0 else 0
-                            if p_sharpe > best_sharpe:
-                                best_sharpe = p_sharpe
-                                best_weights = w
+                        # Portföy performans fonksiyonları
+                        def portfolio_performance(weights):
+                            p_ret = np.sum(mean_returns * weights)
+                            p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_matrix, weights)))
+                            return p_ret, p_vol
 
-                        # Sonuç DataFrame'i
-                        annual_volatilities = np.sqrt(np.diagonal(cov_matrix)) * 100
+                        # Negatif Sharpe (Maximize etmek için minimize edeceğiz)
+                        def neg_sharpe_ratio(weights):
+                            p_ret, p_vol = portfolio_performance(weights)
+                            if p_vol == 0:
+                                return 0
+                            return -(p_ret - risk_free_rate) / p_vol
+
+                        # Minimum Volatilite
+                        def portfolio_volatility(weights):
+                            return portfolio_performance(weights)[1]
+
+                        # Sınırlar ve kısıtlar (Ağırlıklar toplamı 1, her biri 0 ile 1 arasında)
+                        constraints = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1})
+                        bounds = tuple((0.0, 1.0) for _ in range(n_assets))
+                        init_guess = n_assets * [1..0 / n_assets]
+
+                        if "Maximum Sharpe" in optimization_model:
+                            result = minimize(neg_sharpe_ratio, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+                        else:
+                            result = minimize(portfolio_volatility, init_guess, method='SLSQP', bounds=bounds, constraints=constraints)
+
+                        opt_weights = result.x
                         
+                        # Marjinal Risk Katkısı (Marginal Risk Contribution) hesaplama
+                        portfolio_vol = portfolio_performance(opt_weights)[1]
+                        marginal_contrib = np.dot(cov_matrix, opt_weights) / portfolio_vol if portfolio_vol > 0 else np.zeros(n_assets)
+                        risk_contrib = opt_weights * marginal_contrib
+                        risk_contrib_pct = (risk_contrib / portfolio_vol) * 100 if portfolio_vol > 0 else np.zeros(n_assets)
+
                         results_df = pd.DataFrame(
                             {
                                 "Varlık": tickers,
-                                "Optimal Ağırlık (%)": np.round(best_weights * 100, 2),
-                                "Yıllık Volatilite (%)": np.round(annual_volatilities, 2),
-                                "Risk Katkısı (%)": np.round(best_weights * 100, 2),
+                                "Optimal Ağırlık (%)": np.round(opt_weights * 100, 2),
+                                "Yıllık Volatilite (%)": np.round(np.sqrt(np.diagonal(cov_matrix)) * 100, 2),
+                                "Risk Katkısı (%)": np.round(risk_contrib_pct, 2),
                             }
                         )
 
                         st.dataframe(results_df, use_container_width=True)
 
-                        # Portföy Metrikleri
-                        final_p_ret = np.dot(best_weights, mean_returns) * 100
-                        final_p_vol = np.sqrt(np.dot(best_weights.T, np.dot(cov_matrix, best_weights))) * 100
-                        final_sharpe = (final_p_ret/100 - risk_free_rate) / (final_p_vol/100)
+                        # Nihai Portföy Metrikleri
+                        final_ret, final_vol = portfolio_performance(opt_weights)
+                        final_sharpe = (final_ret - risk_free_rate) / final_vol if final_vol > 0 else 0
 
                         m1, m2, m3 = st.columns(3)
-                        m1.metric("Beklenen Portföy Getirisi", f"%{final_p_ret:.2f}")
-                        m2.metric("Portföy Volatilitesi (Risk)", f"%{final_p_vol:.2f}")
+                        m1.metric("Beklenen Portföy Getirisi", f"%{final_ret * 100:.2f}")
+                        m2.metric("Portföy Volatilitesi (Risk)", f"%{final_vol * 100:.2f}")
                         m3.metric("Sharpe Oranı", f"{final_sharpe:.2f}")
 
                 except Exception as e:
-                    st.error(f"Veri çekme veya optimizasyon sırasında hata oluştu: {e}")
+                    st.error(f"Optimizasyon hatası: {e}")
         else:
             st.info(
-                "Ticker'ları girip 'Canlı Veriyi Çek & Optimize Et' butonuna basarak Yahoo Finance verileriyle gerçek optimizasyonu başlat."
+                "Ticker'ları girip 'Matematiksel Optimizasyonu Çalıştır' butonuna basarak SLSQP motorunu ateşle."
             )
 
 with tabs[1]:
