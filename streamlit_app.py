@@ -34,39 +34,43 @@ with st.sidebar.form(key="portfolio_form"):
     )
 
     st.write("---")
-    st.subheader("📊 Risk-Free Oranı (Banka Faizi)")
-    use_rf = st.checkbox("Risksiz Faiz Oranını Kullan", value=True)
+    st.subheader("🎯 Varlık Seçimleri")
 
-    # Otomatik varsayılan faiz: TL için %45, USD için %3.75
+    # 1. FAİZ SEÇİMİ (Artık Varlık Seçimleri'nin içinde)
+    use_rf = st.checkbox("🏦 Risk-Free Faiz Oranını Kullan", value=True)
     default_rf = 45.0 if is_tl_mode else 3.75
 
     rf_input = st.number_input(
-        "Yıllık Banka Mevduat Faizi (%)",
+        "Yıllık Faiz / Mevduat Oranı (%)",
         min_value=0.0,
         max_value=100.0,
         value=default_rf,
         step=0.5,
-        help="Sharpe Oranı hesabı için borsanın kıyaslanacağı mevduat faiz oranı.",
+        help="Sharpe Oranı hesabı için kullanılacak risksiz getiri oranı.",
     )
 
     st.write("---")
-    st.subheader("🎯 Varlık Seçimleri")
 
+    # 2. HİSSE SENETLERİ
     include_stocks = st.checkbox("📈 Hisse Senetleri", value=True)
     stocks_in = st.text_input(
         "Hisseler (Ticker)",
         value="THYAO.IS, EREGL.IS, KCHOL.IS, TUPRS.IS, BIMAS.IS, AKBNK.IS, SISE.IS",
     )
 
+    # 3. ETF'LER
     include_etfs = st.checkbox("🧺 Tematik / Sektörel ETF'ler", value=False)
     etfs_in = st.text_input("ETF'ler (Ticker)", value="SPY, VOO")
 
+    # 4. EMTİA & MADENLER
     include_metals = st.checkbox("🥇 Emtia & Değerli Madenler", value=False)
     metals_in = st.text_input("Maden/Emtia (Ticker)", value="IAU, CPER")
 
+    # 5. EMLAK / GYO
     include_reit = st.checkbox("🏢 Emlak / GYO", value=False)
     reit_in = st.text_input("Emlak/GYO (Ticker)", value="EKGYO.IS")
 
+    # FORM TETİKLEYİCİSİ
     run_opt = st.form_submit_button(
         "🚀 Portföyü Hesapla & Optimize Et", type="primary"
     )
@@ -111,7 +115,6 @@ if run_opt:
             has_bist = any(t.endswith(".IS") for t in tickers)
             has_foreign = any(not t.endswith(".IS") for t in tickers)
 
-            # Kur Dönüşümü Kontrolü: Yalnızca karma portföylerde veya USD modundaki BİST hisselerinde kur çekilir.
             need_currency_conversion = (has_bist and has_foreign) or (
                 not is_tl_mode and has_bist
             )
@@ -157,7 +160,7 @@ if run_opt:
                 valid_cols = [t for t in tickers if t in df_close.columns]
                 df_close = df_close[valid_cols].dropna(how="any")
 
-                # Log Getiri ve Matris Matematiği
+                # Log Return & Matrix Math
                 log_returns = np.log(df_close / df_close.shift(1)).dropna()
                 active_tickers = list(log_returns.columns)
                 N = len(active_tickers)
@@ -169,7 +172,7 @@ if run_opt:
                 cov_vals = cov_matrix.values + np.eye(N) * 1e-6
                 cov_inv = np.linalg.pinv(cov_vals)
 
-                # Sharpe Optimizasyonu
+                # Sharpe Optimization
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
@@ -200,7 +203,7 @@ if run_opt:
                 allocated_amounts = total_budget * weights
 
             # ==========================================
-            # SONUÇ EKRANI
+            # DISPLAY RESULTS
             # ==========================================
             mode_text = "TL (₺)" if is_tl_mode else "USD ($)"
             st.subheader(f"📌 1. Geniş Portföy Özetleri ({mode_text} Bazlı)")
@@ -324,5 +327,5 @@ if run_opt:
             st.error(f"Veri çekme veya matris hesaplama hatası: {str(e)}")
 else:
     st.info(
-        "👈 Sol menüden **TRY (₺) - TL Bazlı** seçeneğini işaretleyip **'🚀 Portföyü Hesapla & Optimize Et'** butonuna basarak TL analizi yapabilirsin."
+        "👈 Sol menüden seçimlerini tamamlayıp **'🚀 Portföyü Hesapla & Optimize Et'** butonuna basarak analizi başlatabilirsin."
     )
