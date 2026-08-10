@@ -34,26 +34,23 @@ with st.sidebar.form(key="portfolio_form"):
     )
 
     st.write("---")
-    st.subheader("📊 Risk-Free Oranı (Faiz)")
-    st.caption(
-        "⚠️ **Önemli:** TL modunda Türkiye faiz oranını, USD modunda ABD faiz oranını giriniz."
-    )
-    use_rf = st.checkbox("Risk-Free Faiz Oranını Kullan", value=True)
+    st.subheader("📊 Risk-Free Oranı (Banka Faizi)")
+    use_rf = st.checkbox("Risksiz Faiz Oranını Kullan", value=True)
 
-    # Varsayılan faiz oranı TL ve USD için farklılaştırıldı
-    default_rf = 40.0 if is_tl_mode else 3.75
+    # Otomatik varsayılan faiz: TL için %45, USD için %3.75
+    default_rf = 45.0 if is_tl_mode else 3.75
 
     rf_input = st.number_input(
-        "Yıllık Risksiz Faiz Oranı (%)",
+        "Yıllık Banka Mevduat Faizi (%)",
         min_value=0.0,
         max_value=100.0,
         value=default_rf,
-        step=0.25,
-        help="Sharpe Oranı hesabı için kıyaslanacak risksiz getiri oranı.",
+        step=0.5,
+        help="Sharpe Oranı hesabı için borsanın kıyaslanacağı mevduat faiz oranı.",
     )
 
     st.write("---")
-    st.subheader("🎯 Varlık Kategorisi Seçimleri")
+    st.subheader("🎯 Varlık Seçimleri")
 
     include_stocks = st.checkbox("📈 Hisse Senetleri", value=True)
     stocks_in = st.text_input(
@@ -114,10 +111,10 @@ if run_opt:
             has_bist = any(t.endswith(".IS") for t in tickers)
             has_foreign = any(not t.endswith(".IS") for t in tickers)
 
-            # Kur dönüşümü gerekliliği kontrolü
-            need_currency_conversion = (
-                has_bist and has_foreign
-            ) or (not is_tl_mode and has_bist)
+            # Kur Dönüşümü Kontrolü: Yalnızca karma portföylerde veya USD modundaki BİST hisselerinde kur çekilir.
+            need_currency_conversion = (has_bist and has_foreign) or (
+                not is_tl_mode and has_bist
+            )
 
             if need_currency_conversion and "USDTRY=X" not in fetch_tickers:
                 fetch_tickers.append("USDTRY=X")
@@ -138,14 +135,13 @@ if run_opt:
                         raw_data[["Close"]] if "Close" in raw_data else raw_data
                     )
 
-                # Kur Dönüşüm Mantığı (Yalnızca Karışık Portföy veya USD Modunda BİST Varsa)
                 if need_currency_conversion and "USDTRY=X" in df_close.columns:
                     usd_try_series = df_close["USDTRY=X"].ffill().bfill()
                     df_close = df_close.drop(columns=["USDTRY=X"])
 
                     current_usd_try = usd_try_series.iloc[-1]
                     st.sidebar.info(
-                        f"💵 Canlı USD/TRY Kuru: **{current_usd_try:.2f} ₺** (USD Dönüşümü Uygulandı)"
+                        f"💵 Canlı USD/TRY Kuru: **{current_usd_try:.2f} ₺** (Kur Dönüşümü Uygulandı)"
                     )
 
                     for col in df_close.columns:
@@ -155,13 +151,13 @@ if run_opt:
                     if "USDTRY=X" in df_close.columns:
                         df_close = df_close.drop(columns=["USDTRY=X"])
                     st.sidebar.success(
-                        "📌 Yerel Para Birimi Modu Aktif (Kur Dönüşümü Yapılmadı)."
+                        "📌 Saf TL Modu Aktif (Veriler doğrudan TL fiyatlarıyla hesaplandı)."
                     )
 
                 valid_cols = [t for t in tickers if t in df_close.columns]
                 df_close = df_close[valid_cols].dropna(how="any")
 
-                # Log Return & Matrix Math
+                # Log Getiri ve Matris Matematiği
                 log_returns = np.log(df_close / df_close.shift(1)).dropna()
                 active_tickers = list(log_returns.columns)
                 N = len(active_tickers)
@@ -173,7 +169,7 @@ if run_opt:
                 cov_vals = cov_matrix.values + np.eye(N) * 1e-6
                 cov_inv = np.linalg.pinv(cov_vals)
 
-                # Sharpe Maximization
+                # Sharpe Optimizasyonu
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
@@ -204,7 +200,7 @@ if run_opt:
                 allocated_amounts = total_budget * weights
 
             # ==========================================
-            # DISPLAY RESULTS
+            # SONUÇ EKRANI
             # ==========================================
             mode_text = "TL (₺)" if is_tl_mode else "USD ($)"
             st.subheader(f"📌 1. Geniş Portföy Özetleri ({mode_text} Bazlı)")
@@ -219,7 +215,7 @@ if run_opt:
             m4.metric(
                 "Sharpe Oranı",
                 f"{sharpe_ratio:.2f}",
-                help=f"Kullanılan Faiz Oranı: %{rf_rate*100:.2f}",
+                help=f"Kıyaslanan Faiz Oranı: %{rf_rate*100:.2f}",
             )
 
             res_df = pd.DataFrame(
@@ -240,7 +236,7 @@ if run_opt:
             )
 
             st.write("---")
-            st.subheader("📊 2. Sektör / Kategori Bazlı Toplam Bütçe Dağılımı")
+            st.subheader("📊 2. Sektör / Kategori Bazlı Dağılım")
 
             cat_summary = (
                 res_df.groupby("Kategori")
@@ -275,7 +271,7 @@ if run_opt:
                 st.plotly_chart(fig_cat_pie, use_container_width=True)
 
             st.write("---")
-            st.subheader("📋 3. Varlık Bazlı Detaylı Tablo")
+            st.subheader("📋 3. Varlık Bazlı Detay Tablosu")
 
             c_tbl, c_pie = st.columns([2.2, 1])
             with c_tbl:
@@ -299,7 +295,7 @@ if run_opt:
                 st.plotly_chart(fig_p, use_container_width=True)
 
             st.write("---")
-            st.subheader("🧮 4. Portföy Matris Analizi")
+            st.subheader("🧮 4. Korelasyon & Kovaryans Matrisleri")
 
             tab_corr, tab_cov, tab_inv = st.tabs(
                 [
@@ -328,5 +324,5 @@ if run_opt:
             st.error(f"Veri çekme veya matris hesaplama hatası: {str(e)}")
 else:
     st.info(
-        "👈 Sol paneldeki parametreleri ve sembolleri düzenleyip **'🚀 Portföyü Hesapla & Optimize Et'** butonuna bastığında hesaplama başlayacaktır."
+        "👈 Sol menüden **TRY (₺) - TL Bazlı** seçeneğini işaretleyip **'🚀 Portföyü Hesapla & Optimize Et'** butonuna basarak TL analizi yapabilirsin."
     )
