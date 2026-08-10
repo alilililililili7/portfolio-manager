@@ -13,7 +13,9 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-st.title("🏛️ Dinamik Varlık Kategori Seçimli & Matris Tabanlı Portföy Motoru")
+st.title(
+    "🏛️ Dinamik Varlık Kategori Seçimli & Kur Eşlemeli Portföy Motoru"
+)
 
 # ==========================================
 # SIDEBAR: BÜTÇE, FAİZ VE KATEGORİ SEÇİMLERİ
@@ -60,7 +62,7 @@ selected_assets = {}
 
 if include_stocks:
     stocks_in = st.sidebar.text_input(
-        "Hisseler (Ticker)", value="NVDA, JPM, LLY, KO"
+        "Hisseler (Ticker)", value="NVDA, JPM, LLY, KO, GARAN.IS"
     )
     for t in stocks_in.split(","):
         if t.strip():
@@ -103,12 +105,18 @@ if run_opt or len(tickers) > 0:
         )
     else:
         try:
-            # 1. Yahoo Finance Data Pull
+            # 1. Yahoo Finance Data Pull & Kur Eşleme
+            fetch_tickers = tickers.copy()
+            has_bist = any(t.endswith(".IS") for t in tickers)
+
+            if has_bist and "USDTRY=X" not in fetch_tickers:
+                fetch_tickers.append("USDTRY=X")
+
             with st.spinner(
-                "Piyasa verileri çekiliyor ve matrisler hesaplanıyor..."
+                "Piyasa verileri ve USD/TRY kur geçmişi çekilip USD bazına dönüştürülüyor..."
             ):
                 raw_data = yf.download(
-                    tickers, period="3y", progress=False, auto_adjust=True
+                    fetch_tickers, period="3y", progress=False, auto_adjust=True
                 )
 
                 if isinstance(raw_data.columns, pd.MultiIndex):
@@ -121,6 +129,21 @@ if run_opt or len(tickers) > 0:
                     df_close = (
                         raw_data[["Close"]] if "Close" in raw_data else raw_data
                     )
+
+                # Dolar/TL Kuru Dönüşümü
+                if "USDTRY=X" in df_close.columns:
+                    usd_try_series = df_close["USDTRY=X"].ffill().bfill()
+                    df_close = df_close.drop(columns=["USDTRY=X"])
+
+                    current_usd_try = usd_try_series.iloc[-1]
+                    st.sidebar.info(
+                        f"💵 Canlı USD/TRY Kuru: **{current_usd_try:.2f} ₺**"
+                    )
+
+                    # BİST Hisselerini (.IS) Geçmiş Günlük Kura Böl
+                    for col in df_close.columns:
+                        if col.endswith(".IS"):
+                            df_close[col] = df_close[col] / usd_try_series
 
                 valid_cols = [t for t in tickers if t in df_close.columns]
                 df_close = df_close[valid_cols].dropna(how="any")
@@ -176,7 +199,9 @@ if run_opt or len(tickers) > 0:
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Toplam Bütçe", f"{symbol}{total_budget:,.2f}")
-            m2.metric("Beklenen Yıllık Getiri", f"%{port_return*100:.2f}")
+            m2.metric(
+                "Beklenen Yıllık Getiri (USD)", f"%{port_return*100:.2f}"
+            )
             m3.metric("Portföy Volatilitesi (Risk)", f"%{port_vol*100:.2f}")
             m4.metric(
                 "Sharpe Oranı",
@@ -193,7 +218,7 @@ if run_opt or len(tickers) > 0:
                 {
                     "Ticker": active_tickers,
                     "Kategori": [selected_assets[t] for t in active_tickers],
-                    "Yıllık Beklenen Getiri": [
+                    "Yıllık Beklenen Getiri (USD)": [
                         f"%{r*100:.2f}" for r in mean_returns.values
                     ],
                     "Bireysel Volatilite (Risk)": [
@@ -220,10 +245,8 @@ if run_opt or len(tickers) > 0:
                 .reset_index()
             )
 
-            # Soru 1 Düzeltmesi: Kaydırma olmaması için dinamik yükseklik
             cat_height = (len(cat_summary) + 1) * 40 + 15
 
-            # Kolon genişliğini tablonun yatayda kesilmemesi için [1.8, 1] yaptık
             c_cat_tbl, c_cat_pie = st.columns([1.8, 1])
             with c_cat_tbl:
                 st.write("**Kategori Sektör Toplamları Tablosu:**")
@@ -254,10 +277,8 @@ if run_opt or len(tickers) > 0:
             st.write("---")
             st.subheader("📋 3. Varlık Bazlı Detaylı Alt Basamak Tablosu")
 
-            # Kaydırmayı engelleyen dinamik yükseklik
             detail_height = (len(res_df) + 1) * 38 + 15
 
-            # Tabloya yeterli genişlik verildi [2.2, 1] - Yatay scroll tamamen engellendi
             c_tbl, c_pie = st.columns([2.2, 1])
             with c_tbl:
                 st.dataframe(
@@ -287,7 +308,7 @@ if run_opt or len(tickers) > 0:
             st.write("---")
 
             # ==========================================
-            # MATRİS ANALİZLERİ (Soru 2 Düzeltmeleri)
+            # MATRİS ANALİZLERİ
             # ==========================================
             st.subheader("🧮 4. Portföy Matris Analizi & Risk Metrikleri")
 
@@ -299,11 +320,9 @@ if run_opt or len(tickers) > 0:
                 ]
             )
 
-            # Matris Tabloları İçin Dikey Scroll Engelleyici Yükseklik Hesabı
             matrix_height = (N + 1) * 38 + 20
 
             with tab_corr:
-                # Korelasyon ısı haritasında taşmayı engelleyen boyutlandırma
                 fig_corr = px.imshow(
                     corr_matrix,
                     text_auto=".2f",
@@ -318,7 +337,7 @@ if run_opt or len(tickers) > 0:
                 st.dataframe(
                     cov_matrix.style.format("{:.4f}"),
                     use_container_width=True,
-                    height=matrix_height,  # Dikey scroll sıfırlandı
+                    height=matrix_height,
                 )
 
             with tab_inv:
@@ -328,7 +347,7 @@ if run_opt or len(tickers) > 0:
                 st.dataframe(
                     df_inv.style.format("{:.4f}"),
                     use_container_width=True,
-                    height=matrix_height,  # Dikey scroll sıfırlandı
+                    height=matrix_height,
                 )
 
         except Exception as e:
