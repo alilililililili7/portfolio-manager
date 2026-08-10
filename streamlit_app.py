@@ -8,113 +8,121 @@ import yfinance as yf
 # PAGE CONFIGURATION
 # ==========================================
 st.set_page_config(
-    page_title="Advanced Multi-Asset Matrix Allocator",
+    page_title="Advanced Portfolio Allocator",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-st.title(
-    "🏛️ Dinamik Varlık Kategori Seçimli & Kur Eşlemeli Portföy Motoru"
-)
+st.title("🏛️ Esnek & Dinamik Portföy Optimizasyon Motoru")
 
 # ==========================================
-# SIDEBAR: BÜTÇE, FAİZ VE KATEGORİ SEÇİMLERİ
+# SIDEBAR: FORM YAPISI
 # ==========================================
-st.sidebar.header("💰 Bütçe ve Para Birimi")
-currency = st.sidebar.selectbox("Para Birimi", options=["USD ($)", "TRY (₺)"])
-symbol = "$" if "USD" in currency else "₺"
+with st.sidebar.form(key="portfolio_form"):
+    st.header("💰 Bütçe ve Para Birimi")
+    currency = st.selectbox(
+        "Para Birimi Seçimi", options=["TRY (₺) - TL Bazlı", "USD ($) - Dolar Bazlı"]
+    )
+    is_tl_mode = "TRY" in currency
+    symbol = "₺" if is_tl_mode else "$"
 
-total_budget = st.sidebar.number_input(
-    f"Toplam Bütçe ({symbol})",
-    min_value=100.0,
-    value=10000.0,
-    step=500.0,
-)
+    total_budget = st.number_input(
+        f"Toplam Bütçe ({symbol})",
+        min_value=100.0,
+        value=100000.0 if is_tl_mode else 10000.0,
+        step=1000.0 if is_tl_mode else 500.0,
+    )
 
-# Faiz Kullanılsın mı? (Seçmeli)
-st.sidebar.write("---")
-st.sidebar.subheader("📊 Risk-Free Oranı (Faiz)")
-use_rf = st.sidebar.checkbox("Risk-Free Faiz Oranını Kullan", value=True)
+    st.write("---")
+    st.subheader("📊 Risk-Free Oranı (Faiz)")
+    st.caption(
+        "⚠️ **Önemli:** TL modunda Türkiye faiz oranını, USD modunda ABD faiz oranını giriniz."
+    )
+    use_rf = st.checkbox("Risk-Free Faiz Oranını Kullan", value=True)
 
-rf_rate = 0.0
-if use_rf:
-    rf_input = st.sidebar.number_input(
-        "Yıllık Faiz Oranı (%)",
+    # Varsayılan faiz oranı TL ve USD için farklılaştırıldı
+    default_rf = 40.0 if is_tl_mode else 3.75
+
+    rf_input = st.number_input(
+        "Yıllık Risksiz Faiz Oranı (%)",
         min_value=0.0,
         max_value=100.0,
-        value=3.75,
+        value=default_rf,
         step=0.25,
-        help="Sharpe Oranı hesabı için risksiz getiri oranı.",
+        help="Sharpe Oranı hesabı için kıyaslanacak risksiz getiri oranı.",
     )
-    rf_rate = rf_input / 100.0
 
-st.sidebar.write("---")
-st.sidebar.subheader("🎯 Varlık Kategorisi Seçimleri")
-st.sidebar.caption("İstemediğin kategorinin işaretini kaldırabilirsin.")
+    st.write("---")
+    st.subheader("🎯 Varlık Kategorisi Seçimleri")
 
-include_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
-include_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=True)
-include_metals = st.sidebar.checkbox("🥇 Emtia & Değerli Madenler", value=True)
-include_reit = st.sidebar.checkbox("🏢 Emlak / GYO", value=True)
-
-# Collect User Assets
-selected_assets = {}
-
-if include_stocks:
-    stocks_in = st.sidebar.text_input(
-        "Hisseler (Ticker)", value="NVDA, JPM, LLY, KO, GARAN.IS"
+    include_stocks = st.checkbox("📈 Hisse Senetleri", value=True)
+    stocks_in = st.text_input(
+        "Hisseler (Ticker)",
+        value="THYAO.IS, EREGL.IS, KCHOL.IS, TUPRS.IS, BIMAS.IS, AKBNK.IS, SISE.IS",
     )
-    for t in stocks_in.split(","):
-        if t.strip():
-            selected_assets[t.strip().upper()] = "Hisse"
 
-if include_etfs:
-    etfs_in = st.sidebar.text_input("ETF'ler (Ticker)", value="QQQ, SMH, SCHD")
-    for t in etfs_in.split(","):
-        if t.strip():
-            selected_assets[t.strip().upper()] = "ETF"
+    include_etfs = st.checkbox("🧺 Tematik / Sektörel ETF'ler", value=False)
+    etfs_in = st.text_input("ETF'ler (Ticker)", value="SPY, VOO")
 
-if include_metals:
-    metals_in = st.sidebar.text_input(
-        "Maden/Emtia (Ticker)", value="GLD, SLV, PALL, BNO"
+    include_metals = st.checkbox("🥇 Emtia & Değerli Madenler", value=False)
+    metals_in = st.text_input("Maden/Emtia (Ticker)", value="IAU, CPER")
+
+    include_reit = st.checkbox("🏢 Emlak / GYO", value=False)
+    reit_in = st.text_input("Emlak/GYO (Ticker)", value="EKGYO.IS")
+
+    run_opt = st.form_submit_button(
+        "🚀 Portföyü Hesapla & Optimize Et", type="primary"
     )
-    for t in metals_in.split(","):
-        if t.strip():
-            selected_assets[t.strip().upper()] = "Emtia/Maden"
-
-if include_reit:
-    reit_in = st.sidebar.text_input("Emlak/GYO (Ticker)", value="VNQ, O")
-    for t in reit_in.split(","):
-        if t.strip():
-            selected_assets[t.strip().upper()] = "Emlak/GYO"
-
-# Gömülü İdeal Taban Ağırlık (%2.5)
-FIXED_MIN_WEIGHT = 0.025
-
-run_opt = st.sidebar.button("🚀 Portföyü Hesapla & Optimize Et", type="primary")
 
 # ==========================================
 # MAIN ANALYZER & MATHEMATICAL ENGINE
 # ==========================================
+selected_assets = {}
+
+if include_stocks and stocks_in:
+    for t in stocks_in.split(","):
+        if t.strip():
+            selected_assets[t.strip().upper()] = "Hisse"
+
+if include_etfs and etfs_in:
+    for t in etfs_in.split(","):
+        if t.strip():
+            selected_assets[t.strip().upper()] = "ETF"
+
+if include_metals and metals_in:
+    for t in metals_in.split(","):
+        if t.strip():
+            selected_assets[t.strip().upper()] = "Emtia/Maden"
+
+if include_reit and reit_in:
+    for t in reit_in.split(","):
+        if t.strip():
+            selected_assets[t.strip().upper()] = "Emlak/GYO"
+
+rf_rate = (rf_input / 100.0) if use_rf else 0.0
+FIXED_MIN_WEIGHT = 0.025
 tickers = list(selected_assets.keys())
 
-if run_opt or len(tickers) > 0:
+if run_opt:
     if len(tickers) < 2:
         st.error(
             "Matris ve Korelasyon hesaplaması için lütfen en az 2 aktif varlık (Ticker) seçin."
         )
     else:
         try:
-            # 1. Yahoo Finance Data Pull & Kur Eşleme
             fetch_tickers = tickers.copy()
             has_bist = any(t.endswith(".IS") for t in tickers)
+            has_foreign = any(not t.endswith(".IS") for t in tickers)
 
-            if has_bist and "USDTRY=X" not in fetch_tickers:
+            # Kur dönüşümü gerekliliği kontrolü
+            need_currency_conversion = (
+                has_bist and has_foreign
+            ) or (not is_tl_mode and has_bist)
+
+            if need_currency_conversion and "USDTRY=X" not in fetch_tickers:
                 fetch_tickers.append("USDTRY=X")
 
-            with st.spinner(
-                "Piyasa verileri ve USD/TRY kur geçmişi çekilip USD bazına dönüştürülüyor..."
-            ):
+            with st.spinner("Piyasa verileri çekiliyor ve analiz ediliyor..."):
                 raw_data = yf.download(
                     fetch_tickers, period="3y", progress=False, auto_adjust=True
                 )
@@ -130,25 +138,30 @@ if run_opt or len(tickers) > 0:
                         raw_data[["Close"]] if "Close" in raw_data else raw_data
                     )
 
-                # Dolar/TL Kuru Dönüşümü
-                if "USDTRY=X" in df_close.columns:
+                # Kur Dönüşüm Mantığı (Yalnızca Karışık Portföy veya USD Modunda BİST Varsa)
+                if need_currency_conversion and "USDTRY=X" in df_close.columns:
                     usd_try_series = df_close["USDTRY=X"].ffill().bfill()
                     df_close = df_close.drop(columns=["USDTRY=X"])
 
                     current_usd_try = usd_try_series.iloc[-1]
                     st.sidebar.info(
-                        f"💵 Canlı USD/TRY Kuru: **{current_usd_try:.2f} ₺**"
+                        f"💵 Canlı USD/TRY Kuru: **{current_usd_try:.2f} ₺** (USD Dönüşümü Uygulandı)"
                     )
 
-                    # BİST Hisselerini (.IS) Geçmiş Günlük Kura Böl
                     for col in df_close.columns:
                         if col.endswith(".IS"):
                             df_close[col] = df_close[col] / usd_try_series
+                else:
+                    if "USDTRY=X" in df_close.columns:
+                        df_close = df_close.drop(columns=["USDTRY=X"])
+                    st.sidebar.success(
+                        "📌 Yerel Para Birimi Modu Aktif (Kur Dönüşümü Yapılmadı)."
+                    )
 
                 valid_cols = [t for t in tickers if t in df_close.columns]
                 df_close = df_close[valid_cols].dropna(how="any")
 
-                # 2. Log Return & Matrix Math
+                # Log Return & Matrix Math
                 log_returns = np.log(df_close / df_close.shift(1)).dropna()
                 active_tickers = list(log_returns.columns)
                 N = len(active_tickers)
@@ -160,11 +173,10 @@ if run_opt or len(tickers) > 0:
                 cov_vals = cov_matrix.values + np.eye(N) * 1e-6
                 cov_inv = np.linalg.pinv(cov_vals)
 
-                # Sharpe Maximization Optimization
+                # Sharpe Maximization
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # Taban Ağırlık Hesabı (%2.5 Min Garanti)
                 raw_weights = np.maximum(raw_weights, 0.0)
                 if np.sum(raw_weights) > 0:
                     raw_weights = raw_weights / np.sum(raw_weights)
@@ -183,7 +195,6 @@ if run_opt or len(tickers) > 0:
                 else:
                     weights = np.ones(N) / N
 
-                # Portfolio Metrics
                 port_return = np.sum(mean_returns.values * weights)
                 port_vol = np.sqrt(np.dot(weights.T, np.dot(cov_vals, weights)))
                 sharpe_ratio = (
@@ -193,32 +204,29 @@ if run_opt or len(tickers) > 0:
                 allocated_amounts = total_budget * weights
 
             # ==========================================
-            # DISPLAY RESULTS & TABULAR DASHBOARD
+            # DISPLAY RESULTS
             # ==========================================
-            st.subheader("📌 1. Geniş Portföy & Metrik Özetleri")
+            mode_text = "TL (₺)" if is_tl_mode else "USD ($)"
+            st.subheader(f"📌 1. Geniş Portföy Özetleri ({mode_text} Bazlı)")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Toplam Bütçe", f"{symbol}{total_budget:,.2f}")
             m2.metric(
-                "Beklenen Yıllık Getiri (USD)", f"%{port_return*100:.2f}"
+                f"Beklenen Yıllık Getiri ({mode_text})",
+                f"%{port_return*100:.2f}",
             )
             m3.metric("Portföy Volatilitesi (Risk)", f"%{port_vol*100:.2f}")
             m4.metric(
                 "Sharpe Oranı",
                 f"{sharpe_ratio:.2f}",
-                help=(
-                    f"Risk-Free Oranı: %{rf_rate*100:.2f}"
-                    if use_rf
-                    else "Faiz Hesaba Katılmadı (%0.0)"
-                ),
+                help=f"Kullanılan Faiz Oranı: %{rf_rate*100:.2f}",
             )
 
-            # Master DataFrame
             res_df = pd.DataFrame(
                 {
                     "Ticker": active_tickers,
                     "Kategori": [selected_assets[t] for t in active_tickers],
-                    "Yıllık Beklenen Getiri (USD)": [
+                    f"Yıllık Beklenen Getiri ({mode_text})": [
                         f"%{r*100:.2f}" for r in mean_returns.values
                     ],
                     "Bireysel Volatilite (Risk)": [
@@ -245,11 +253,8 @@ if run_opt or len(tickers) > 0:
                 .reset_index()
             )
 
-            cat_height = (len(cat_summary) + 1) * 40 + 15
-
             c_cat_tbl, c_cat_pie = st.columns([1.8, 1])
             with c_cat_tbl:
-                st.write("**Kategori Sektör Toplamları Tablosu:**")
                 st.dataframe(
                     cat_summary.style.format(
                         {
@@ -259,7 +264,6 @@ if run_opt or len(tickers) > 0:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    height=cat_height,
                 )
             with c_cat_pie:
                 fig_cat_pie = px.pie(
@@ -267,17 +271,11 @@ if run_opt or len(tickers) > 0:
                     values="Optimal Ağırlık (%)",
                     names="Kategori",
                     hole=0.4,
-                    title="Sektörel Dağılım",
-                )
-                fig_cat_pie.update_traces(
-                    textposition="inside", textinfo="percent+label"
                 )
                 st.plotly_chart(fig_cat_pie, use_container_width=True)
 
             st.write("---")
-            st.subheader("📋 3. Varlık Bazlı Detaylı Alt Basamak Tablosu")
-
-            detail_height = (len(res_df) + 1) * 38 + 15
+            st.subheader("📋 3. Varlık Bazlı Detaylı Tablo")
 
             c_tbl, c_pie = st.columns([2.2, 1])
             with c_tbl:
@@ -290,7 +288,6 @@ if run_opt or len(tickers) > 0:
                     ),
                     use_container_width=True,
                     hide_index=True,
-                    height=detail_height,
                 )
             with c_pie:
                 fig_p = px.pie(
@@ -298,57 +295,38 @@ if run_opt or len(tickers) > 0:
                     values="Optimal Ağırlık (%)",
                     names="Ticker",
                     hole=0.35,
-                    title="Varlık Bazlı Dağılım",
-                )
-                fig_p.update_traces(
-                    textposition="inside", textinfo="percent+label"
                 )
                 st.plotly_chart(fig_p, use_container_width=True)
 
             st.write("---")
-
-            # ==========================================
-            # MATRİS ANALİZLERİ
-            # ==========================================
-            st.subheader("🧮 4. Portföy Matris Analizi & Risk Metrikleri")
+            st.subheader("🧮 4. Portföy Matris Analizi")
 
             tab_corr, tab_cov, tab_inv = st.tabs(
                 [
-                    "🔗 Korelasyon Matrisi (Correlation)",
-                    "📐 Kovaryans Matrisi (Covariance)",
-                    "🔄 Ters Kovaryans Matrisi (Inverse Matrix)",
+                    "🔗 Korelasyon Matrisi",
+                    "📐 Kovaryans Matrisi",
+                    "🔄 Ters Kovaryans Matrisi",
                 ]
             )
 
-            matrix_height = (N + 1) * 38 + 20
-
             with tab_corr:
                 fig_corr = px.imshow(
-                    corr_matrix,
-                    text_auto=".2f",
-                    color_continuous_scale="RdBu_r",
-                    title="Varlıklar Arası Korelasyon Matrisi",
-                    aspect="auto",
+                    corr_matrix, text_auto=".2f", color_continuous_scale="RdBu_r"
                 )
-                fig_corr.update_layout(height=max(500, N * 40))
                 st.plotly_chart(fig_corr, use_container_width=True)
 
             with tab_cov:
-                st.dataframe(
-                    cov_matrix.style.format("{:.4f}"),
-                    use_container_width=True,
-                    height=matrix_height,
-                )
+                st.dataframe(cov_matrix.style.format("{:.4f}"))
 
             with tab_inv:
                 df_inv = pd.DataFrame(
                     cov_inv, index=active_tickers, columns=active_tickers
                 )
-                st.dataframe(
-                    df_inv.style.format("{:.4f}"),
-                    use_container_width=True,
-                    height=matrix_height,
-                )
+                st.dataframe(df_inv.style.format("{:.4f}"))
 
         except Exception as e:
             st.error(f"Veri çekme veya matris hesaplama hatası: {str(e)}")
+else:
+    st.info(
+        "👈 Sol paneldeki parametreleri ve sembolleri düzenleyip **'🚀 Portföyü Hesapla & Optimize Et'** butonuna bastığında hesaplama başlayacaktır."
+    )
