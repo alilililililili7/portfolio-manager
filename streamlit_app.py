@@ -38,57 +38,54 @@ include_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
 include_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=True)
 include_metals = st.sidebar.checkbox("🥇 Emtia & Değerli Madenler", value=True)
 include_reit = st.sidebar.checkbox("🏢 Emlak / GYO", value=True)
-include_rf = st.sidebar.checkbox(
-    "💵 Faiz / Repo / Risk-Free", value=False
-)  # Varsayılan kapalı
+include_rf = st.sidebar.checkbox("💵 Risk-Free Faiz Oranını Kullan", value=True)
+
+# Manuel Faiz Girişi (Senaryo Simülasyonu İçin)
+rf_rate = 0.0
+if include_rf:
+    rf_input = st.sidebar.number_input(
+        "Manuel Yıllık Faiz Oranı (%)",
+        min_value=0.0,
+        max_value=100.0,
+        value=4.50,
+        step=0.25,
+        help="Faiz düşüş/yükseliş senaryolarına göre Sharpe oranını test etmek için kendin oran girebilirsin.",
+    )
+    rf_rate = rf_input / 100.0
 
 # Collect User Assets
 selected_assets = {}
 
 if include_stocks:
     stocks_in = st.sidebar.text_input(
-        "Hisseler (Ticker)", value="NVDA, AAPL, JPM"
+        "Hisseler (Ticker)", value="NVDA, JPM, LLY, KO"
     )
     for t in stocks_in.split(","):
         if t.strip():
             selected_assets[t.strip().upper()] = "Hisse"
 
 if include_etfs:
-    etfs_in = st.sidebar.text_input("ETF'ler (Ticker)", value="QQQ, SMH")
+    etfs_in = st.sidebar.text_input("ETF'ler (Ticker)", value="QQQ, SMH, SCHD")
     for t in etfs_in.split(","):
         if t.strip():
             selected_assets[t.strip().upper()] = "ETF"
 
 if include_metals:
-    metals_in = st.sidebar.text_input("Maden/Emtia (Ticker)", value="GLD, SLV")
+    metals_in = st.sidebar.text_input(
+        "Maden/Emtia (Ticker)", value="GLD, SLV, PALL, BNO"
+    )
     for t in metals_in.split(","):
         if t.strip():
             selected_assets[t.strip().upper()] = "Emtia/Maden"
 
 if include_reit:
-    reit_in = st.sidebar.text_input("Emlak/GYO (Ticker)", value="VNQ")
+    reit_in = st.sidebar.text_input("Emlak/GYO (Ticker)", value="VNQ, O")
     for t in reit_in.split(","):
         if t.strip():
             selected_assets[t.strip().upper()] = "Emlak/GYO"
 
-rf_rate = 0.0
-if include_rf:
-    rf_rate_input = st.sidebar.number_input(
-        "Yıllık Faiz Oranı (%)", min_value=0.0, value=4.0, step=0.25
-    )
-    rf_rate = rf_rate_input / 100.0
-
-st.sidebar.write("---")
-st.sidebar.subheader("⚙️ Taban Ağırlık Kısıtı")
-min_w_pct = st.sidebar.slider(
-    "Minimum Varlık Ağırlığı (%)",
-    min_value=1.0,
-    max_value=10.0,
-    value=3.0,
-    step=0.5,
-    help="Hiçbir varlığın %0 çıkmaması için taban oran belirler.",
-)
-min_w = min_w_pct / 100.0
+# --- GÖMÜLÜ İDEAL MİNİMUM TABAN AĞIRLIK (%2.5) ---
+FIXED_MIN_WEIGHT = 0.025
 
 run_opt = st.sidebar.button("🚀 Portföyü Hesapla & Optimize Et", type="primary")
 
@@ -144,15 +141,12 @@ if run_opt or len(tickers) > 0:
                 )  # Numerical stability
                 cov_inv = np.linalg.pinv(cov_vals)  # Ters Kovaryans Matrisi
 
-                # Tangency Portfolio Optimization (Sharpe Maximization)
+                # Tangency Portfolio Optimization (Sharpe Maximization with Manuel RF Rate)
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # --- SIFIRLANMAYI ENGELLEYEN TABAN AĞIRLIK MANTIK ---
-                # 1. Sıfır veya eksi çıkanları en az min_w yap
-                raw_weights = np.maximum(raw_weights, min_w)
-
-                # 2. Toplamı tekrar %100'e (1.0) normalize et
+                # --- GÖMÜLÜ TABAN AĞIRLIK UYGULAMASI (%2.5) ---
+                raw_weights = np.maximum(raw_weights, FIXED_MIN_WEIGHT)
                 weights = raw_weights / np.sum(raw_weights)
 
                 # Portfolio Metrics
@@ -170,6 +164,16 @@ if run_opt or len(tickers) > 0:
             # ==========================================
             st.subheader("📌 1. Optimal Bütçe & Varlık Dağılım Tablosu")
 
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Toplam Bütçe", f"{symbol}{total_budget:,.2f}")
+            m2.metric("Beklenen Yıllık Getiri", f"%{port_return*100:.2f}")
+            m3.metric("Portföy Volatilitesi (Risk)", f"%{port_vol*100:.2f}")
+            m4.metric(
+                "Sharpe Oranı",
+                f"{sharpe_ratio:.2f}",
+                help=f"Hesaplamada Kullanılan Manuel Faiz Oranı: %{rf_rate*100:.2f}",
+            )
+
             res_df = pd.DataFrame(
                 {
                     "Ticker": active_tickers,
@@ -186,12 +190,6 @@ if run_opt or len(tickers) > 0:
                     ),
                 }
             )
-
-            m1, m2, m3, m4 = st.columns(4)
-            m1.metric("Toplam Bütçe", f"{symbol}{total_budget:,.2f}")
-            m2.metric("Beklenen Yıllık Getiri", f"%{port_return*100:.2f}")
-            m3.metric("Portföy Volatilitesi (Risk)", f"%{port_vol*100:.2f}")
-            m4.metric("Sharpe Oranı", f"{sharpe_ratio:.2f}")
 
             c_tbl, c_pie = st.columns([1.3, 1])
             with c_tbl:
@@ -221,7 +219,7 @@ if run_opt or len(tickers) > 0:
             st.write("---")
 
             # ==========================================
-            # MATRİS ANALİZLERİ (KORELASYON & KOVARYANS)
+            # MATRİS ANALİZLERİ
             # ==========================================
             st.subheader("🧮 2. Portföy Matris Analizi & Risk Metrikleri")
 
@@ -234,9 +232,6 @@ if run_opt or len(tickers) > 0:
             )
 
             with tab_corr:
-                st.caption(
-                    "Korelasyon -1 ile +1 arasındadır. Birbirleriyle korelasyonu düşük (maviye yakın) varlıklar riski düşürür."
-                )
                 fig_corr = px.imshow(
                     corr_matrix,
                     text_auto=".2f",
@@ -246,17 +241,11 @@ if run_opt or len(tickers) > 0:
                 st.plotly_chart(fig_corr, use_container_width=True)
 
             with tab_cov:
-                st.caption(
-                    "Yıllıklandırılmış kovaryans matrisi (Σ). Diagonaller varlıkların kendi varyansıdır."
-                )
                 st.dataframe(
                     cov_matrix.style.format("{:.4f}"), use_container_width=True
                 )
 
             with tab_inv:
-                st.caption(
-                    "Markowitz MPT optimizasyonunda ağırlıkları (w = Σ^-1 · μ) hesaplamada kullanılan Ters Kovaryans Matrisi (Σ^-1)."
-                )
                 df_inv = pd.DataFrame(
                     cov_inv, index=active_tickers, columns=active_tickers
                 )
