@@ -16,7 +16,7 @@ st.set_page_config(
 st.title("🏛️ Dinamik Varlık Kategori Seçimli & Matris Tabanlı Portföy Motoru")
 
 # ==========================================
-# SIDEBAR: BÜTÇE VE KATEGORİ SEÇİMLERİ
+# SIDEBAR: BÜTÇE, FAİZ VE KATEGORİ SEÇİMLERİ
 # ==========================================
 st.sidebar.header("💰 Bütçe ve Para Birimi")
 currency = st.sidebar.selectbox("Para Birimi", options=["USD ($)", "TRY (₺)"])
@@ -29,7 +29,7 @@ total_budget = st.sidebar.number_input(
     step=500.0,
 )
 
-# Manuel Yıllık Faiz Oranı - HER ZAMAN AÇIK
+# Manuel Yıllık Faiz Oranı (Her Zaman Açık)
 st.sidebar.write("---")
 st.sidebar.subheader("📊 Risk-Free Oranı (Faiz)")
 rf_input = st.sidebar.number_input(
@@ -138,16 +138,14 @@ if run_opt or len(tickers) > 0:
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # --- GERÇEK MİNİMUM TABAN KISITI ALGORİTMASI ---
+                # --- GERÇEK MİNİMUM TABAN KISITI ALGORİTMASI (%2.5 Garanti) ---
                 raw_weights = np.maximum(raw_weights, 0.0)
                 if np.sum(raw_weights) > 0:
                     raw_weights = raw_weights / np.sum(raw_weights)
                 else:
                     raw_weights = np.ones(N) / N
 
-                # Her varlığa tam olarak en az FIXED_MIN_WEIGHT garantisi
                 weights = np.maximum(raw_weights, FIXED_MIN_WEIGHT)
-                # Kalan serbest bütçeyi orantılı dağıt
                 excess_w = weights - FIXED_MIN_WEIGHT
                 if np.sum(excess_w) > 0:
                     weights = (
@@ -216,9 +214,11 @@ if run_opt or len(tickers) > 0:
                 .reset_index()
             )
 
+            cat_height = (len(cat_summary) + 1) * 38 + 10
+
             c_cat_tbl, c_cat_pie = st.columns([1.2, 1])
             with c_cat_tbl:
-                st.write("**Kategori Sektör Toplamları Table:**")
+                st.write("**Kategori Sektör Toplamları Tablosu:**")
                 st.dataframe(
                     cat_summary.style.format(
                         {
@@ -228,6 +228,7 @@ if run_opt or len(tickers) > 0:
                     ),
                     use_container_width=True,
                     hide_index=True,
+                    height=cat_height,
                 )
             with c_cat_pie:
                 fig_cat_pie = px.pie(
@@ -245,6 +246,9 @@ if run_opt or len(tickers) > 0:
             st.write("---")
             st.subheader("📋 3. Varlık Bazlı Detaylı Alt Basamak Tablosu")
 
+            # Kaydırmalı Kutu Engelleme (Dinamik Yükseklik)
+            detail_height = (len(res_df) + 1) * 38 + 10
+
             c_tbl, c_pie = st.columns([1.3, 1])
             with c_tbl:
                 st.dataframe(
@@ -256,6 +260,7 @@ if run_opt or len(tickers) > 0:
                     ),
                     use_container_width=True,
                     hide_index=True,
+                    height=detail_height,
                 )
             with c_pie:
                 fig_p = px.pie(
