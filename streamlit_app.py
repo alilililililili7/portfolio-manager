@@ -29,6 +29,19 @@ total_budget = st.sidebar.number_input(
     step=500.0,
 )
 
+# Manuel Yıllık Faiz Oranı - HER ZAMAN AÇIK
+st.sidebar.write("---")
+st.sidebar.subheader("📊 Risk-Free Oranı (Faiz)")
+rf_input = st.sidebar.number_input(
+    "Yıllık Risk-Free / Faiz Oranı (%)",
+    min_value=0.0,
+    max_value=100.0,
+    value=3.75,
+    step=0.25,
+    help="Sharpe Oranı optimizasyonunda referans alınacak risksiz getiri oranıdır.",
+)
+rf_rate = rf_input / 100.0
+
 st.sidebar.write("---")
 st.sidebar.subheader("🎯 Varlık Kategorisi Seçimleri")
 st.sidebar.caption("İstemediğin kategorinin işaretini kaldırabilirsin.")
@@ -38,20 +51,6 @@ include_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
 include_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=True)
 include_metals = st.sidebar.checkbox("🥇 Emtia & Değerli Madenler", value=True)
 include_reit = st.sidebar.checkbox("🏢 Emlak / GYO", value=True)
-include_rf = st.sidebar.checkbox("💵 Risk-Free Faiz Oranını Kullan", value=True)
-
-# Manuel Faiz Girişi (Senaryo Simülasyonu İçin)
-rf_rate = 0.0
-if include_rf:
-    rf_input = st.sidebar.number_input(
-        "Manuel Yıllık Faiz Oranı (%)",
-        min_value=0.0,
-        max_value=100.0,
-        value=4.50,
-        step=0.25,
-        help="Faiz düşüş/yükseliş senaryolarına göre Sharpe oranını test etmek için kendin oran girebilirsin.",
-    )
-    rf_rate = rf_input / 100.0
 
 # Collect User Assets
 selected_assets = {}
@@ -84,7 +83,7 @@ if include_reit:
         if t.strip():
             selected_assets[t.strip().upper()] = "Emlak/GYO"
 
-# --- GÖMÜLÜ İDEAL MİNİMUM TABAN AĞIRLIK (%2.5) ---
+# Gömülü İdeal Taban Ağırlık (%2.5)
 FIXED_MIN_WEIGHT = 0.025
 
 run_opt = st.sidebar.button("🚀 Portföyü Hesapla & Optimize Et", type="primary")
@@ -128,26 +127,37 @@ if run_opt or len(tickers) > 0:
                 active_tickers = list(log_returns.columns)
                 N = len(active_tickers)
 
-                # Annually Metrics
-                mean_returns = (
-                    log_returns.mean() * 252
-                )  # Yıllık Beklenen Getiri Vektörü (μ)
-                cov_matrix = log_returns.cov() * 252  # Kovaryans Matrisi (Σ)
-                corr_matrix = log_returns.corr()  # Korelasyon Matrisi (R)
+                mean_returns = log_returns.mean() * 252
+                cov_matrix = log_returns.cov() * 252
+                corr_matrix = log_returns.corr()
 
-                # Matrix Inversion (Σ^-1)
-                cov_vals = (
-                    cov_matrix.values + np.eye(N) * 1e-6
-                )  # Numerical stability
-                cov_inv = np.linalg.pinv(cov_vals)  # Ters Kovaryans Matrisi
+                cov_vals = cov_matrix.values + np.eye(N) * 1e-6
+                cov_inv = np.linalg.pinv(cov_vals)
 
-                # Tangency Portfolio Optimization (Sharpe Maximization with Manuel RF Rate)
+                # Sharpe Maximization Optimization
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # --- GÖMÜLÜ TABAN AĞIRLIK UYGULAMASI (%2.5) ---
-                raw_weights = np.maximum(raw_weights, FIXED_MIN_WEIGHT)
-                weights = raw_weights / np.sum(raw_weights)
+                # --- GERÇEK MİNİMUM TABAN KISITI ALGORİTMASI ---
+                raw_weights = np.maximum(raw_weights, 0.0)
+                if np.sum(raw_weights) > 0:
+                    raw_weights = raw_weights / np.sum(raw_weights)
+                else:
+                    raw_weights = np.ones(N) / N
+
+                # Her varlığa tam olarak en az FIXED_MIN_WEIGHT garantisi
+                weights = np.maximum(raw_weights, FIXED_MIN_WEIGHT)
+                # Kalan serbest bütçeyi orantılı dağıt
+                excess_w = weights - FIXED_MIN_WEIGHT
+                if np.sum(excess_w) > 0:
+                    weights = (
+                        FIXED_MIN_WEIGHT
+                        + (1.0 - N * FIXED_MIN_WEIGHT)
+                        * excess_w
+                        / np.sum(excess_w)
+                    )
+                else:
+                    weights = np.ones(N) / N
 
                 # Portfolio Metrics
                 port_return = np.sum(mean_returns.values * weights)
@@ -156,13 +166,12 @@ if run_opt or len(tickers) > 0:
                     (port_return - rf_rate) / port_vol if port_vol > 0 else 0.0
                 )
 
-                # Budget Allocation Calculation
                 allocated_amounts = total_budget * weights
 
             # ==========================================
             # DISPLAY RESULTS & TABULAR DASHBOARD
             # ==========================================
-            st.subheader("📌 1. Optimal Bütçe & Varlık Dağılım Tablosu")
+            st.subheader("📌 1. Geniş Portföy & Metrik Özetleri")
 
             m1, m2, m3, m4 = st.columns(4)
             m1.metric("Toplam Bütçe", f"{symbol}{total_budget:,.2f}")
@@ -171,9 +180,10 @@ if run_opt or len(tickers) > 0:
             m4.metric(
                 "Sharpe Oranı",
                 f"{sharpe_ratio:.2f}",
-                help=f"Hesaplamada Kullanılan Manuel Faiz Oranı: %{rf_rate*100:.2f}",
+                help=f"Hesaplamada Kullanılan Risk-Free Oranı: %{rf_rate*100:.2f}",
             )
 
+            # Master DataFrame
             res_df = pd.DataFrame(
                 {
                     "Ticker": active_tickers,
@@ -190,6 +200,50 @@ if run_opt or len(tickers) > 0:
                     ),
                 }
             )
+
+            st.write("---")
+            st.subheader("📊 2. Sektör / Kategori Bazlı Toplam Bütçe Dağılımı")
+
+            # Kategori Bazlı Gruplama
+            cat_summary = (
+                res_df.groupby("Kategori")
+                .agg(
+                    {
+                        "Optimal Ağırlık (%)": "sum",
+                        f"Yatırılacak Tutar ({symbol})": "sum",
+                    }
+                )
+                .reset_index()
+            )
+
+            c_cat_tbl, c_cat_pie = st.columns([1.2, 1])
+            with c_cat_tbl:
+                st.write("**Kategori Sektör Toplamları Table:**")
+                st.dataframe(
+                    cat_summary.style.format(
+                        {
+                            f"Yatırılacak Tutar ({symbol})": f"{symbol}{{:,.2f}}",
+                            "Optimal Ağırlık (%)": "%{:.2f}",
+                        }
+                    ),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            with c_cat_pie:
+                fig_cat_pie = px.pie(
+                    cat_summary,
+                    values="Optimal Ağırlık (%)",
+                    names="Kategori",
+                    hole=0.4,
+                    title="Sektörel Dağılım Pasta Grafiği",
+                )
+                fig_cat_pie.update_traces(
+                    textposition="inside", textinfo="percent+label"
+                )
+                st.plotly_chart(fig_cat_pie, use_container_width=True)
+
+            st.write("---")
+            st.subheader("📋 3. Varlık Bazlı Detaylı Alt Basamak Tablosu")
 
             c_tbl, c_pie = st.columns([1.3, 1])
             with c_tbl:
@@ -209,7 +263,7 @@ if run_opt or len(tickers) > 0:
                     values="Optimal Ağırlık (%)",
                     names="Ticker",
                     hole=0.35,
-                    title="Para Dağılımı",
+                    title="Varlık Bazlı Para Dağılımı",
                 )
                 fig_p.update_traces(
                     textposition="inside", textinfo="percent+label"
@@ -221,7 +275,7 @@ if run_opt or len(tickers) > 0:
             # ==========================================
             # MATRİS ANALİZLERİ
             # ==========================================
-            st.subheader("🧮 2. Portföy Matris Analizi & Risk Metrikleri")
+            st.subheader("🧮 4. Portföy Matris Analizi & Risk Metrikleri")
 
             tab_corr, tab_cov, tab_inv = st.tabs(
                 [
