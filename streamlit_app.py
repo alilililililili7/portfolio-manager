@@ -29,24 +29,27 @@ total_budget = st.sidebar.number_input(
     step=500.0,
 )
 
-# Manuel Yıllık Faiz Oranı (Her Zaman Açık)
+# Faiz Kullanılsın mı? (Seçmeli)
 st.sidebar.write("---")
 st.sidebar.subheader("📊 Risk-Free Oranı (Faiz)")
-rf_input = st.sidebar.number_input(
-    "Yıllık Risk-Free / Faiz Oranı (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=3.75,
-    step=0.25,
-    help="Sharpe Oranı optimizasyonunda referans alınacak risksiz getiri oranıdır.",
-)
-rf_rate = rf_input / 100.0
+use_rf = st.sidebar.checkbox("Risk-Free Faiz Oranını Kullan", value=True)
+
+rf_rate = 0.0
+if use_rf:
+    rf_input = st.sidebar.number_input(
+        "Yıllık Faiz Oranı (%)",
+        min_value=0.0,
+        max_value=100.0,
+        value=3.75,
+        step=0.25,
+        help="Sharpe Oranı hesabı için risksiz getiri oranı.",
+    )
+    rf_rate = rf_input / 100.0
 
 st.sidebar.write("---")
 st.sidebar.subheader("🎯 Varlık Kategorisi Seçimleri")
 st.sidebar.caption("İstemediğin kategorinin işaretini kaldırabilirsin.")
 
-# Category Checkboxes
 include_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
 include_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=True)
 include_metals = st.sidebar.checkbox("🥇 Emtia & Değerli Madenler", value=True)
@@ -138,7 +141,7 @@ if run_opt or len(tickers) > 0:
                 excess_returns = mean_returns.values - rf_rate
                 raw_weights = np.dot(cov_inv, excess_returns)
 
-                # --- GERÇEK MİNİMUM TABAN KISITI ALGORİTMASI (%2.5 Garanti) ---
+                # Taban Ağırlık Hesabı (%2.5 Min Garanti)
                 raw_weights = np.maximum(raw_weights, 0.0)
                 if np.sum(raw_weights) > 0:
                     raw_weights = raw_weights / np.sum(raw_weights)
@@ -178,7 +181,11 @@ if run_opt or len(tickers) > 0:
             m4.metric(
                 "Sharpe Oranı",
                 f"{sharpe_ratio:.2f}",
-                help=f"Hesaplamada Kullanılan Risk-Free Oranı: %{rf_rate*100:.2f}",
+                help=(
+                    f"Risk-Free Oranı: %{rf_rate*100:.2f}"
+                    if use_rf
+                    else "Faiz Hesaba Katılmadı (%0.0)"
+                ),
             )
 
             # Master DataFrame
@@ -202,7 +209,6 @@ if run_opt or len(tickers) > 0:
             st.write("---")
             st.subheader("📊 2. Sektör / Kategori Bazlı Toplam Bütçe Dağılımı")
 
-            # Kategori Bazlı Gruplama
             cat_summary = (
                 res_df.groupby("Kategori")
                 .agg(
@@ -214,9 +220,11 @@ if run_opt or len(tickers) > 0:
                 .reset_index()
             )
 
-            cat_height = (len(cat_summary) + 1) * 38 + 10
+            # Soru 1 Düzeltmesi: Kaydırma olmaması için dinamik yükseklik
+            cat_height = (len(cat_summary) + 1) * 40 + 15
 
-            c_cat_tbl, c_cat_pie = st.columns([1.2, 1])
+            # Kolon genişliğini tablonun yatayda kesilmemesi için [1.8, 1] yaptık
+            c_cat_tbl, c_cat_pie = st.columns([1.8, 1])
             with c_cat_tbl:
                 st.write("**Kategori Sektör Toplamları Tablosu:**")
                 st.dataframe(
@@ -236,7 +244,7 @@ if run_opt or len(tickers) > 0:
                     values="Optimal Ağırlık (%)",
                     names="Kategori",
                     hole=0.4,
-                    title="Sektörel Dağılım Pasta Grafiği",
+                    title="Sektörel Dağılım",
                 )
                 fig_cat_pie.update_traces(
                     textposition="inside", textinfo="percent+label"
@@ -246,10 +254,11 @@ if run_opt or len(tickers) > 0:
             st.write("---")
             st.subheader("📋 3. Varlık Bazlı Detaylı Alt Basamak Tablosu")
 
-            # Kaydırmalı Kutu Engelleme (Dinamik Yükseklik)
-            detail_height = (len(res_df) + 1) * 38 + 10
+            # Kaydırmayı engelleyen dinamik yükseklik
+            detail_height = (len(res_df) + 1) * 38 + 15
 
-            c_tbl, c_pie = st.columns([1.3, 1])
+            # Tabloya yeterli genişlik verildi [2.2, 1] - Yatay scroll tamamen engellendi
+            c_tbl, c_pie = st.columns([2.2, 1])
             with c_tbl:
                 st.dataframe(
                     res_df.style.format(
@@ -268,7 +277,7 @@ if run_opt or len(tickers) > 0:
                     values="Optimal Ağırlık (%)",
                     names="Ticker",
                     hole=0.35,
-                    title="Varlık Bazlı Para Dağılımı",
+                    title="Varlık Bazlı Dağılım",
                 )
                 fig_p.update_traces(
                     textposition="inside", textinfo="percent+label"
@@ -278,7 +287,7 @@ if run_opt or len(tickers) > 0:
             st.write("---")
 
             # ==========================================
-            # MATRİS ANALİZLERİ
+            # MATRİS ANALİZLERİ (Soru 2 Düzeltmeleri)
             # ==========================================
             st.subheader("🧮 4. Portföy Matris Analizi & Risk Metrikleri")
 
@@ -290,18 +299,26 @@ if run_opt or len(tickers) > 0:
                 ]
             )
 
+            # Matris Tabloları İçin Dikey Scroll Engelleyici Yükseklik Hesabı
+            matrix_height = (N + 1) * 38 + 20
+
             with tab_corr:
+                # Korelasyon ısı haritasında taşmayı engelleyen boyutlandırma
                 fig_corr = px.imshow(
                     corr_matrix,
                     text_auto=".2f",
                     color_continuous_scale="RdBu_r",
                     title="Varlıklar Arası Korelasyon Matrisi",
+                    aspect="auto",
                 )
+                fig_corr.update_layout(height=max(500, N * 40))
                 st.plotly_chart(fig_corr, use_container_width=True)
 
             with tab_cov:
                 st.dataframe(
-                    cov_matrix.style.format("{:.4f}"), use_container_width=True
+                    cov_matrix.style.format("{:.4f}"),
+                    use_container_width=True,
+                    height=matrix_height,  # Dikey scroll sıfırlandı
                 )
 
             with tab_inv:
@@ -309,7 +326,9 @@ if run_opt or len(tickers) > 0:
                     cov_inv, index=active_tickers, columns=active_tickers
                 )
                 st.dataframe(
-                    df_inv.style.format("{:.4f}"), use_container_width=True
+                    df_inv.style.format("{:.4f}"),
+                    use_container_width=True,
+                    height=matrix_height,  # Dikey scroll sıfırlandı
                 )
 
         except Exception as e:
