@@ -2,12 +2,12 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from scipy.linalg import pinv
 import scipy.stats as stats
 import streamlit as st
 import yfinance as yf
-from scipy.linalg import pinv
 
-# ARCH/GARCH Modülü (Kurulu değilse fallback çalışır)
+# ARCH/GARCH Modülü Güvenlik Kontrolü
 try:
     from arch import arch_model
 
@@ -24,20 +24,15 @@ st.set_page_config(
 # ==========================================
 
 
-# ==========================================
-# 1. YARDIMCI VE KANTİTATİF FONKSİYONLAR (GÜNCELLENDİ)
-# ==========================================
-
-
 def fetch_data(tickers, period="3y"):
-    """YFinance üzerinden kapanış verilerini çeker ve eksikleri tam temizler."""
+    """YFinance üzerinden kapanış verilerini çeker ve günlük getirileri temiz döner."""
     if not tickers:
         return pd.DataFrame()
     data = yf.download(tickers, period=period, progress=False)["Close"]
     if isinstance(data, pd.Series):
         data = data.to_frame()
 
-    # Tam temizlik: Eksik verileri doldur ve Inf değerleri temizle
+    # Tam temizlik: Eksik verileri doldur ve Inf/NaN temizle
     data = data.dropna(how="all").ffill().bfill()
     returns = data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     return returns
@@ -49,18 +44,14 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
     cov_matrix = returns_df.cov() * 252
 
     cov_values = cov_matrix.values
-
-    # 1. Temizlik: NaN/Inf varsa 0 ile değiştir
     cov_values = np.nan_to_num(cov_values, nan=0.0, posinf=0.0, neginf=0.0)
 
-    # 2. Diagonal Jitter (SVD tıkanmasını %100 engelleyen sayısal kararlılık)
+    # Diagonal Jitter (SVD tıkanmasını %100 engelleyen sayısal kararlılık)
     cov_values += np.eye(cov_values.shape[0]) * 1e-6
 
-    # 3. Scipy Pinverse (SVD patlamaz)
     try:
         cov_inv = pinv(cov_values)
     except Exception:
-        # Ekstra güvenlik önlemi
         cov_inv = np.linalg.pinv(
             cov_values + np.eye(cov_values.shape[0]) * 1e-4
         )
@@ -86,16 +77,14 @@ def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
     """VaR, CVaR, Skewness, Kurtosis hesaplamaları."""
     port_daily_returns = returns_df.dot(weights)
 
-    # Risk & İstatistik
+    # İstatistik
     skewness = stats.skew(port_daily_returns)
-    kurtosis = stats.kurtosis(port_daily_returns)  # Excess Kurtosis
+    kurtosis = stats.kurtosis(port_daily_returns)
 
     # Parametrik & Historical VaR (%95 Güven)
     var_95 = np.percentile(port_daily_returns, 5)
     cvar_tail = port_daily_returns[port_daily_returns <= var_95]
-    cvar_95 = (
-        cvar_tail.mean() if len(cvar_tail) > 0 else var_95
-    )  # Expected Shortfall
+    cvar_95 = cvar_tail.mean() if len(cvar_tail) > 0 else var_95
 
     # Yıllıklandırılmış Getiri & Volatilite
     ann_return = port_daily_returns.mean() * 252
@@ -142,41 +131,34 @@ def run_garch_volatility(returns_series):
         forecast_var = res.forecast(horizon=1).variance.iloc[-1, 0]
         annualized_garch_vol = (np.sqrt(forecast_var) / 100) * np.sqrt(252)
         return annualized_garch_vol
-    except:
+    except Exception:
         return returns_series.std() * np.sqrt(252)
 
 
-def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=1000):
-    """Cholesky Ayrıştırması ile Çok Değişkenli GBM Monte Carlo Simülasyonu."""
+def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=500):
+    """Cholesky Ayrıştırması ile GBM Monte Carlo Simülasyonu."""
     port_returns = returns_df.dot(weights)
     mu = port_returns.mean()
     cov = returns_df.cov().values
 
-    # Cholesky Decomposition
     try:
         L = np.linalg.cholesky(cov)
     except np.linalg.LinAlgError:
-        # Pozitif yarı-tanımlı değilse jitter ekle
         cov += np.eye(cov.shape[0]) * 1e-6
         L = np.linalg.cholesky(cov)
 
     num_assets = len(weights)
     w = weights.values
 
-    # Simülasyon Patikaları
     simulation_paths = np.zeros((days, N))
-    dt = 1
 
     for i in range(N):
-        # Bağımsız rastgele normaller -> Korelasyonlu normallere dönüşüm
         Z = np.random.normal(size=(days, num_assets))
         correlated_Z = np.dot(Z, L.T)
 
-        # Ağırlıklandırılmış Günlük Portföy Şoku
         port_shocks = np.dot(correlated_Z, w)
         daily_factors = 1 + (mu + port_shocks)
 
-        # Fiyat Patikası
         price_path = initial_budget * np.cumprod(daily_factors)
         simulation_paths[:, i] = price_path
 
@@ -184,9 +166,9 @@ def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=1000):
 
 
 def run_ornstein_uhlenbeck(
-    initial_rate, target_rate=0.35, theta=0.1, sigma=0.05, days=252, N=200
+    initial_rate, target_rate=0.35, theta=0.1, sigma=0.05, days=252, N=100
 ):
-    """Faiz Oranı Mean-Reversion (Vasicek / OU / CIR) Simülasyonu."""
+    """Faiz Oranı Mean-Reversion Simülasyonu."""
     dt = 1 / days
     rates = np.zeros((days, N))
     rates[0, :] = initial_rate
@@ -216,7 +198,6 @@ budget = st.sidebar.number_input(
 
 st.sidebar.title("🎯 Varlık Seçimleri")
 
-# Risk-Free Faiz
 use_rf = st.sidebar.checkbox("🏛️ Risk-Free Faiz Oranını Kullan", value=True)
 rf_rate_annual = (
     st.sidebar.number_input(
@@ -227,21 +208,20 @@ rf_rate_annual = (
     else 0.0
 )
 
-# Hisse Senetleri
 use_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
 stock_tickers_input = st.sidebar.text_input(
-    "Hisseler (Ticker)", "THYAO.IS, EREGL.IS, KCHOL.IS, TUPRS.IS, BIMAS.IS, AKBNK.IS, SISE.IS"
+    "Hisseler (Ticker)",
+    "THYAO.IS, EREGL.IS, KCHOL.IS, TUPRS.IS, BIMAS.IS, AKBNK.IS, SISE.IS",
 )
 
-# ETF'ler
 use_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=False)
 etf_tickers_input = st.sidebar.text_input("ETF'ler (Ticker)", "SPY, VOO")
 
-# Emtia
-use_commodities = st.sidebar.checkbox("🥇 Emtia & Değerli Madenler", value=False)
+use_commodities = st.sidebar.checkbox(
+    "🥇 Emtia & Değerli Madenler", value=False
+)
 commodity_tickers_input = st.sidebar.text_input("Maden/Emtia (Ticker)", "IAU, CPER")
 
-# GYO
 use_reits = st.sidebar.checkbox("🏢 Emlak / GYO", value=False)
 reit_tickers_input = st.sidebar.text_input("Emlak/GYO (Ticker)", "EKGYO.IS")
 
@@ -252,7 +232,6 @@ calculate_btn = st.sidebar.button("🚀 Portföyü Hesapla & Optimize Et")
 # ==========================================
 st.title("🏛️ Esnek & Dinamik Portföy Optimizasyon Motoru")
 
-# Seçili Ticker'ları Birleştir
 selected_tickers = []
 if use_stocks and stock_tickers_input:
     selected_tickers.extend([t.strip() for t in stock_tickers_input.split(",")])
@@ -271,9 +250,14 @@ if len(selected_tickers) < 2:
     )
     st.stop()
 
-# Veri Çekme ve Hesaplama
-raw_data = fetch_data(selected_tickers)
-returns_df = raw_data.pct_change().dropna()
+# Veri Çekme (returns_df doğrudan günlük getirilerdir!)
+returns_df = fetch_data(selected_tickers)
+
+if returns_df.empty or len(returns_df.columns) < 2:
+    st.error(
+        "Veri çekilemedi veya seçilen ticker'lar yetersiz. Lütfen ticker'ları kontrol edin."
+    )
+    st.stop()
 
 # 1. MPT Ağırlık ve Kovaryans Tersi
 optimal_weights, sample_cov = calculate_mpt_weights(
@@ -305,7 +289,6 @@ col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
     st.subheader("📋 2. Sektör / Kategori Bazlı Dağılım")
-    # Basit Kategori Tanımlama
     categories = []
     for ticker in optimal_weights.index:
         if ".IS" in ticker:
@@ -406,7 +389,7 @@ with tab_pinv:
         "**Analitik Sharpe Optimizasyonunda kullanılan $Pinv(\\Sigma)$ Matrisi:**"
     )
     pinv_matrix = pd.DataFrame(
-        np.linalg.pinv(sample_cov.values),
+        pinv(sample_cov.values),
         index=sample_cov.index,
         columns=sample_cov.columns,
     )
@@ -459,7 +442,6 @@ with q_tab1:
         help=">0 ise ekstrem tavan/taban günleri sık yaşanır.",
     )
 
-    # Düşüş Dağılım Grafiği
     fig_hist = px.histogram(
         metrics["Daily_Returns"],
         nbins=50,
@@ -476,14 +458,13 @@ with q_tab1:
 # SEKMELER 2: Monte Carlo Simulation
 with q_tab2:
     st.write(
-        "**Cholesky Ayrıştırması** ile varlıkların korelasyon yapısı korunarak **1000 Farklı Gelecek Patikası (1 Yıl / 252 Gün)** simüle edilmiştir."
+        "**Cholesky Ayrıştırması** ile varlıkların korelasyon yapısı korunarak **500 Farklı Gelecek Patikası (1 Yıl / 252 Gün)** simüle edilmiştir."
     )
     mc_paths = run_monte_carlo_gbm(
         returns_df, optimal_weights, budget, days=252, N=500
     )
 
     fig_mc = go.Figure()
-    # İlk 50 patikayı çizdir (Kasma olmaması için)
     for i in range(min(50, mc_paths.shape[1])):
         fig_mc.add_trace(
             go.Scatter(
@@ -495,7 +476,6 @@ with q_tab2:
             )
         )
 
-    # Ortalama ve Alt/Üst Bantlar
     mean_path = np.mean(mc_paths, axis=1)
     p05_path = np.percentile(mc_paths, 5, axis=1)
     p95_path = np.percentile(mc_paths, 95, axis=1)
