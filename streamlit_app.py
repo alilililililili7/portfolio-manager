@@ -17,7 +17,9 @@ except ImportError:
     ARCH_AVAILABLE = False
 
 st.set_page_config(
-    page_title="Esnek & Dinamik Portföy Engine", layout="wide", page_icon="🏛️"
+    page_title="Simetrik Multi-Currency Portföy Engine",
+    layout="wide",
+    page_icon="🏛️",
 )
 
 # ==========================================
@@ -25,17 +27,53 @@ st.set_page_config(
 # ==========================================
 
 
-def fetch_data(tickers, period="3y"):
-    """YFinance üzerinden kapanış verilerini çeker ve günlük getirileri temiz döner."""
+def fetch_and_convert_data(tickers, base_currency="TRY (₺)", period="3y"):
+    """
+    Kullanıcının seçtiği baz para birimine göre (TL veya USD):
+    - TL Seçildiyse: USD varlıkları USD/TRY kuruyla ÇARPAR.
+    - USD Seçildiyse: TL varlıkları TRY/USD kuruyla ÇARPAR (USDTRY'ye BÖLER).
+    """
     if not tickers:
         return pd.DataFrame()
-    data = yf.download(tickers, period=period, progress=False)["Close"]
+
+    all_symbols = list(set(tickers + ["USDTRY=X"]))
+    data = yf.download(all_symbols, period=period, progress=False)["Close"]
+
     if isinstance(data, pd.Series):
         data = data.to_frame()
 
-    # Tam temizlik: Eksik verileri doldur ve Inf/NaN temizle
     data = data.dropna(how="all").ffill().bfill()
-    returns = data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+
+    # FX Kurunu Ayır
+    usd_try = data["USDTRY=X"] if "USDTRY=X" in data.columns else None
+    if "USDTRY=X" in data.columns:
+        data = data.drop(columns=["USDTRY=X"])
+
+    converted_data = pd.DataFrame(index=data.index)
+
+    for col in data.columns:
+        is_bist_asset = col.endswith(".IS")
+
+        if base_currency.startswith("TRY"):
+            # === BAZ PARA BİRİMİ: TL ===
+            if is_bist_asset or usd_try is None:
+                # Zaten TL varlığı, dönüşüm yok
+                converted_data[col] = data[col]
+            else:
+                # Dolar varlığını TL'ye çevir: Fiyat_USD * USDTRY
+                converted_data[col] = data[col] * usd_try
+        else:
+            # === BAZ PARA BİRİMİ: USD ===
+            if is_bist_asset and usd_try is not None:
+                # TL varlığını USD'ye çevir: Fiyat_TL * (1 / USDTRY) => Fiyat_TL / USDTRY
+                converted_data[col] = data[col] / usd_try
+            else:
+                # Zaten USD varlığı, dönüşüm yok
+                converted_data[col] = data[col]
+
+    returns = (
+        converted_data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    )
     return returns
 
 
@@ -48,12 +86,9 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
     cov_matrix = returns_df.cov() * 252
     num_assets = len(mean_returns)
 
-    # 1. Ridge/L2 Regülarizasyonu (Collinearity & Multicollinearity Çözümü)
-    # SPY - VOO gibi tam korelasyonlu varlıklarda matris tekilliğini engeller.
+    # Ridge / L2 Regularization (Kovaryans Matrisi Tekilliğini Engeller)
     lambda_ridge = 1e-4
-    cov_values = (
-        cov_matrix.values + np.eye(num_assets) * lambda_ridge
-    )  # Sigma + lambda * I
+    cov_values = cov_matrix.values + np.eye(num_assets) * lambda_ridge
 
     def portfolio_performance(weights):
         portfolio_return = np.dot(weights, mean_returns)
@@ -62,24 +97,20 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
         )
         return portfolio_return, portfolio_vol
 
-    # Maksimum Sharpe Hedef Fonksiyonu
     def negative_sharpe(weights):
         p_ret, p_vol = portfolio_performance(weights)
         if p_vol == 0:
             return 1e6
         return -(p_ret - risk_free_rate) / p_vol
 
-    # Minimum Volatilite Hedef Fonksiyonu (Fallback Modu İçin)
     def min_volatility(weights):
         _, p_vol = portfolio_performance(weights)
         return p_vol
 
-    # Optimizasyon Kısıtları & Sınırları
     constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
     bounds = tuple((0.0, 1.0) for _ in range(num_assets))
     initial_weights = np.ones(num_assets) / num_assets
 
-    # 2. Max Sharpe Optimizasyonu
     opt_sharpe = minimize(
         negative_sharpe,
         initial_weights,
@@ -91,7 +122,7 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
     opt_w = opt_sharpe.x
     best_ret, _ = portfolio_performance(opt_w)
 
-    # 3. Fallback Control: Eğer Beklenen Getiri < Risksiz Faiz ise Min-Volatility Moduna Geç
+    # Fallback Control (Beklenen Getiri < Risksiz Faiz ise Min-Vol Modu)
     is_fallback = False
     if best_ret < risk_free_rate:
         is_fallback = True
@@ -104,34 +135,26 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
         )
         opt_w = opt_min_vol.x
 
-    # Temizlik: Negatif gürültüleri sıfırla ve yeniden normalize et
     opt_w = np.maximum(opt_w, 0.0)
     opt_w = opt_w / np.sum(opt_w)
 
     cov_df = pd.DataFrame(
         cov_values, index=returns_df.columns, columns=returns_df.columns
     )
-    return (
-        pd.Series(opt_w, index=returns_df.columns),
-        cov_df,
-        is_fallback,
-    )
+    return pd.Series(opt_w, index=returns_df.columns), cov_df, is_fallback
 
 
 def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
-    """VaR, CVaR, Skewness, Kurtosis hesaplamaları."""
+    """VaR, CVaR, Skewness, Kurtosis ve Sharpe analizi."""
     port_daily_returns = returns_df.dot(weights)
 
-    # İstatistik
     skewness = stats.skew(port_daily_returns)
     kurtosis = stats.kurtosis(port_daily_returns)
 
-    # Parametrik & Historical VaR (%95 Güven)
     var_95 = np.percentile(port_daily_returns, 5)
     cvar_tail = port_daily_returns[port_daily_returns <= var_95]
     cvar_95 = cvar_tail.mean() if len(cvar_tail) > 0 else var_95
 
-    # Yıllıklandırılmış Getiri & Volatilite
     ann_return = port_daily_returns.mean() * 252
     ann_vol = port_daily_returns.std() * np.sqrt(252)
     sharpe = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else 0
@@ -174,8 +197,7 @@ def run_garch_volatility(returns_series):
         )
         res = am.fit(disp="off")
         forecast_var = res.forecast(horizon=1).variance.iloc[-1, 0]
-        annualized_garch_vol = (np.sqrt(forecast_var) / 100) * np.sqrt(252)
-        return annualized_garch_vol
+        return (np.sqrt(forecast_var) / 100) * np.sqrt(252)
     except Exception:
         return returns_series.std() * np.sqrt(252)
 
@@ -200,12 +222,9 @@ def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=500):
     for i in range(N):
         Z = np.random.normal(size=(days, num_assets))
         correlated_Z = np.dot(Z, L.T)
-
         port_shocks = np.dot(correlated_Z, w)
         daily_factors = 1 + (mu + port_shocks)
-
-        price_path = initial_budget * np.cumprod(daily_factors)
-        simulation_paths[:, i] = price_path
+        simulation_paths[:, i] = initial_budget * np.cumprod(daily_factors)
 
     return simulation_paths
 
@@ -229,13 +248,16 @@ def run_ornstein_uhlenbeck(
 
 
 # ==========================================
-# 2. SIDEBAR (VARLIK VE BÜTÇE GİRDİLERİ)
+# 2. SIDEBAR (VARLIK VE DİNANİK FAİZ GİRDİLERİ)
 # ==========================================
-st.sidebar.title("💰 Bütçe ve Para Birimi")
-currency = st.sidebar.selectbox(
-    "Para Birimi Seçimi", ["TRY (₺) - TL Bazlı", "USD ($) - Dolar Bazlı"]
+st.sidebar.title("💰 Baz Para Birimi & Bütçe")
+
+base_currency = st.sidebar.selectbox(
+    "Portföy Baz Para Birimi",
+    ["TRY (₺) - TL Bazlı Raporlama", "USD ($) - Dolar Bazlı Raporlama"],
 )
-curr_symbol = "₺" if "TRY" in currency else "$"
+
+curr_symbol = "₺" if "TRY" in base_currency else "$"
 
 budget = st.sidebar.number_input(
     f"Toplam Bütçe ({curr_symbol})",
@@ -244,41 +266,32 @@ budget = st.sidebar.number_input(
     step=5000.0,
 )
 
-st.sidebar.title("🎯 Varlık Seçimleri")
+st.sidebar.title("🏛️ Dinamik Risksiz Faiz Ayarları")
 
-use_rf = st.sidebar.checkbox("🏛️ Risk-Free Faiz Oranını Kullan", value=True)
-rf_rate_annual = (
-    st.sidebar.number_input(
-        "Yıllık Faiz / Mevduat Oranı (%)", value=45.0, step=1.0
-    )
-    / 100.0
-    if use_rf
-    else 0.0
+col_rf1, col_rf2 = st.sidebar.columns(2)
+rf_tl_input = (
+    col_rf1.number_input("TL Faiz / Mevduat (%)", value=45.0, step=1.0) / 100.0
+)
+rf_usd_input = (
+    col_rf2.number_input("USD Faiz / SOFR (%)", value=5.0, step=0.5) / 100.0
 )
 
-use_stocks = st.sidebar.checkbox("📈 Hisse Senetleri", value=True)
+# Seçilen Baz Para Birimine Göre Aktif Risksiz Faiz
+effective_rf = rf_tl_input if "TRY" in base_currency else rf_usd_input
+
+st.sidebar.title("🎯 Varlık Seçimleri")
+
+use_stocks = st.sidebar.checkbox("📈 BİST Hisseleri (TL)", value=True)
 stock_tickers_input = st.sidebar.text_input(
-    "Hisseler (Ticker)",
+    "BİST Hisseleri",
     "THYAO.IS, EREGL.IS, KCHOL.IS, TUPRS.IS, BIMAS.IS, AKBNK.IS, SISE.IS",
 )
 
-use_etfs = st.sidebar.checkbox("🧺 Tematik / Sektörel ETF'ler", value=False)
-etf_tickers_input = st.sidebar.text_input("ETF'ler (Ticker)", "SPY, VOO")
+use_etfs = st.sidebar.checkbox("🧺 ABD ETF / Hisseleri (USD)", value=True)
+etf_tickers_input = st.sidebar.text_input("ABD Varlıkları", "SPY, VOO")
 
-use_commodities = st.sidebar.checkbox(
-    "🥇 Emtia & Değerli Madenler", value=False
-)
-commodity_tickers_input = st.sidebar.text_input("Maden/Emtia (Ticker)", "IAU, CPER")
-
-use_reits = st.sidebar.checkbox("🏢 Emlak / GYO", value=False)
-reit_tickers_input = st.sidebar.text_input("Emlak/GYO (Ticker)", "EKGYO.IS")
-
-calculate_btn = st.sidebar.button("🚀 Portföyü Hesapla & Optimize Et")
-
-# ==========================================
-# 3. ANA SAYFA VE HESAPLAMA MOTORU
-# ==========================================
-st.title("🏛️ Esnek & Dinamik Portföy Optimizasyon Motoru")
+use_commodities = st.sidebar.checkbox("🥇 Emtialar (USD)", value=True)
+commodity_tickers_input = st.sidebar.text_input("Emtialar", "IAU, CPER")
 
 selected_tickers = []
 if use_stocks and stock_tickers_input:
@@ -289,17 +302,20 @@ if use_commodities and commodity_tickers_input:
     selected_tickers.extend(
         [t.strip() for t in commodity_tickers_input.split(",")]
     )
-if use_reits and reit_tickers_input:
-    selected_tickers.extend([t.strip() for t in reit_tickers_input.split(",")])
+
+# ==========================================
+# 3. ANA SAYFA VE HESAPLAMA MOTORU
+# ==========================================
+st.title("🏛️ Simetrik Multi-Currency Portföy Optimizasyon Motoru")
 
 if len(selected_tickers) < 2:
-    st.warning(
-        "Lütfen optimizasyon için en az 2 varlık seçin veya ticker girin."
-    )
+    st.warning("Lütfen optimizasyon için en az 2 varlık seçin.")
     st.stop()
 
-# Veri Çekme
-returns_df = fetch_data(selected_tickers)
+# Dönüştürülmüş Getiri Verilerini Çekme
+returns_df = fetch_and_convert_data(
+    selected_tickers, base_currency=base_currency
+)
 
 if returns_df.empty or len(returns_df.columns) < 2:
     st.error(
@@ -307,30 +323,41 @@ if returns_df.empty or len(returns_df.columns) < 2:
     )
     st.stop()
 
-# 1. MPT Ağırlık ve Kovaryans Tersi
+# Optimizasyon ve Metrikler
 optimal_weights, sample_cov, is_fallback = calculate_mpt_weights(
-    returns_df, risk_free_rate=rf_rate_annual
+    returns_df, risk_free_rate=effective_rf
 )
-
-# 2. Advanced Metrikler
 metrics = calculate_advanced_metrics(
-    returns_df, optimal_weights, risk_free_rate=rf_rate_annual
+    returns_df, optimal_weights, risk_free_rate=effective_rf
 )
 
-# FALLBACK UYARISI (Eksi Sharpe Koruması)
+# Bilgi Çubuğu
+conversion_info = (
+    "USD varlıklar USD/TRY kuru ile ÇARPILARAK TL'ye dönüştürüldü."
+    if "TRY" in base_currency
+    else "BİST (TL) varlıklar TRY/USD kuru ile ÇARPILARAK (USDTRY'ye bölünerek) USD'ye dönüştürüldü."
+)
+
+st.info(
+    f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
+    f"**Kur Mantığı:** {conversion_info} | "
+    f"**Modeldeki Risksiz Faiz ($R_f$):** **%{effective_rf*100:.2f}**"
+)
+
+# Fallback Uyarısı
 if is_fallback:
     st.error(
         f"⚠️ **UYARI: Negatif Sharpe Oranı / Yetersiz Risk Primi!**\n\n"
         f"Seçilen varlık sepetinin beklenen getiri potansiyeli (**%{metrics['Ann_Return']*100:.2f}**), "
-        f"risksiz faiz oranının (**%{rf_rate_annual*100:.2f}**) altında kalmaktadır.\n\n"
+        f"seçilen baz para biriminin risksiz faiz oranının (**%{effective_rf*100:.2f}**) altında kalmaktadır.\n\n"
         f"Max Sharpe portföyü oluşturulamadığı için sistem otomatik olarak **Minimum Volatilite (Minimum Risk)** "
-        f"moduna düşürülmüştür. Rasyonel finansal karar açısından sermayeyi faiz/mevduat veya risksiz araçlarda değerlendirmek daha avantajlı olabilir."
+        f"moduna düşürülmüştür."
     )
 
 # ==========================================
 # 1. GENİŞ PORTFÖY ÖZETLERİ
 # ==========================================
-st.subheader(f"📌 1. Geniş Portföy Özetleri ({curr_symbol} Bazlı)")
+st.subheader(f"📌 1. Portföy Genel Özeti ({curr_symbol} Bazlı)")
 
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Toplam Bütçe", f"{curr_symbol}{budget:,.2f}")
@@ -346,17 +373,17 @@ st.divider()
 col_left, col_right = st.columns([1.2, 1])
 
 with col_left:
-    st.subheader("📋 2. Sektör / Kategori Bazlı Dağılım")
+    st.subheader("📋 2. Sektör & Kategori Bazlı Dağılım")
     categories = []
     for ticker in optimal_weights.index:
         if ".IS" in ticker:
-            categories.append("Hisse (BİST)")
+            categories.append("Hisse (BİST / TL)")
         elif ticker in ["SPY", "VOO"]:
-            categories.append("ETF / ABD")
+            categories.append("ETF (ABD / USD)")
         elif ticker in ["IAU", "CPER"]:
-            categories.append("Emtia")
+            categories.append("Emtia (USD)")
         else:
-            categories.append("Hisse / Diğer")
+            categories.append("Diğer")
 
     alloc_df = pd.DataFrame(
         {
@@ -391,7 +418,9 @@ with col_right:
     st.plotly_chart(fig_donut, use_container_width=True)
 
 # 3. Varlık Bazlı Detay Tablosu
-st.subheader("📋 3. Varlık Bazlı Detay Tablosu")
+st.subheader(
+    f"📋 3. Varlık Bazlı Detay Tablosu ({base_currency.split(' ')[0]} Bazında)"
+)
 asset_details = []
 for ticker in returns_df.columns:
     ann_ret = returns_df[ticker].mean() * 252
@@ -403,7 +432,7 @@ for ticker in returns_df.columns:
             "Kategori": alloc_df.loc[
                 alloc_df["Ticker"] == ticker, "Kategori"
             ].values[0],
-            "Yıllık Beklenen Getiri (%)": round(ann_ret * 100, 2),
+            f"Yıllık Beklenen Getiri ({curr_symbol} %)": round(ann_ret * 100, 2),
             "Bireysel Volatilite (Risk %)": round(ann_vol * 100, 2),
             "Optimal Ağırlık (%)": round(w * 100, 2),
             f"Yatırılacak Tutar ({curr_symbol})": round(w * budget, 2),
@@ -599,9 +628,11 @@ with q_tab4:
         "Mevcut faiz oranının zamanla hedeflenen uzun dönemli ortalamaya ($dt$) nasıl yakınsadığını simüle eder."
     )
 
+    target_rate_sim = 0.30 if "TRY" in base_currency else 0.035
+
     ou_paths = run_ornstein_uhlenbeck(
-        initial_rate=rf_rate_annual,
-        target_rate=0.30,
+        initial_rate=effective_rf,
+        target_rate=target_rate_sim,
         theta=0.15,
         sigma=0.04,
         days=252,
@@ -628,7 +659,7 @@ with q_tab4:
         )
     )
     fig_ou.update_layout(
-        title="Yıllık Politika/Mevduat Faizi Monte Carlo Patikası (OU Process)",
+        title=f"Yıllık {base_currency.split(' ')[0]} Risksiz Faiz Monte Carlo Patikası (OU Process)",
         xaxis_title="Gün",
         yaxis_title="Faiz Oranı (%)",
     )
