@@ -1,4 +1,7 @@
 from io import BytesIO
+import json
+import os
+import google.generativeai as genai
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -31,7 +34,7 @@ st.set_page_config(
 def fetch_and_convert_data(tickers, base_currency="TRY (₺)", period="3y"):
     """Kullanıcının seçtiği baz para birimine göre (TL veya USD) verileri çeker ve dönüştürür."""
     if not tickers:
-        return pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame()
 
     all_symbols = list(set(tickers + ["USDTRY=X"]))
     data = yf.download(all_symbols, period=period, progress=False)["Close"]
@@ -167,10 +170,39 @@ def calculate_fractional_kelly(
     return float(np.clip(full_kelly * fraction, 0.10, 1.0))
 
 
+# ==========================================
+# GEMINI AI İLERİ DÖNÜK GETİRİ TAHMİNİ
+# ==========================================
+def get_gemini_market_views(asset_names, gemini_api_key):
+    """Gemini API kullanarak varlıklar için 1 yıllık ileri dönük getiri beklentileri üretir."""
+    if not gemini_api_key:
+        return None
+    try:
+        genai.configure(api_key=gemini_api_key)
+        model = genai.GenerativeModel("gemini-2.5-flash")
+
+        prompt = f"""
+        Sen kıdemli bir kantitatif portföy yöneticisisin. 
+        Aşağıdaki varlıklar için önümüzdeki 1 yıllık (uzun vadeli) makro ve sektörel beklentilere dayalı yıllıklandırılmış tahmini getiri oranlarını yüzde olarak belirle:
+        Varlıklar: {', '.join(asset_names)}
+        
+        Sadece JSON formatında, anahtar kelime varlık adı, değer ise float türünde yıllık getiri beklentisi (örn: 0.35 formatında) olacak şekilde yanıt ver. Başka hiçbir açıklama yazma.
+        """
+        response = model.generate_content(prompt)
+        cleaned_text = (
+            response.text.replace("```json", "").replace("```", "").strip()
+        )
+        views_dict = json.loads(cleaned_text)
+        return views_dict
+    except Exception as e:
+        st.sidebar.warning(f"Gemini API Hatası: {e}. Manuel varsayılanlar kullanılacak.")
+        return None
+
+
 def apply_black_litterman_views(
     prior_returns, cov_matrix, views_dict, tau=0.05
 ):
-    """Black-Litterman Modeli ile Yatırımcı Görüşlerini Beklenen Getirilere Entegre Eder."""
+    """Black-Litterman Modeli ile Yatırımcı / AI Görüşlerini Beklenen Getirilere Entegre Eder."""
     if not views_dict:
         return prior_returns
 
@@ -180,11 +212,16 @@ def apply_black_litterman_views(
 
     for idx, (ticker, view_val) in enumerate(views_dict.items()):
         if ticker in prior_returns.index:
-            col_idx = list(prior_returns.index).get_loc(
-                ticker
-            ) if hasattr(list(prior_returns.index), "get_loc") else list(prior_returns.index).index(ticker)
+            col_idx = (
+                list(prior_returns.index).get_loc(ticker)
+                if hasattr(list(prior_returns.index), "get_loc")
+                else list(prior_returns.index).index(ticker)
+            )
             P[idx, col_idx] = 1.0
             Q[idx] = view_val
+
+    if len(Q) == 0:
+        return prior_returns
 
     # Omega (Görüş Belirsizliği)
     omega = np.diag(np.diag(P @ (tau * cov_matrix.values) @ P.T)) * 1e-4
@@ -208,9 +245,10 @@ def calculate_master_integrated_opt(
     dcf_potentials=None,
     max_asset_cap=0.25,
     max_bist_cap=0.50,
-    bl_views=None,
+    gemini_api_key=None,
+    use_ai_views=False,
 ):
-    """GARCH + EWMA + Mean-CVaR + Birebir Rf Kullanımı + EBITDA Penalty + DCF Blend + Black-Litterman."""
+    """GARCH + EWMA + Mean-CVaR + Birebir Rf Kullanımı + EBITDA Penalty + DCF Blend + Gemini AI Black-Litterman."""
     raw_mean_returns = returns_df.mean() * 252
     num_assets = len(raw_mean_returns)
 
@@ -238,7 +276,13 @@ def calculate_master_integrated_opt(
         blended_returns[t] = (quant_ret * 0.70) + (dcf_pot * 0.30)
     blended_series = pd.Series(blended_returns)
 
-    # Black-Litterman Görüşleri Uygulama
+    # Gemini AI Görüşlerini Al ve Black-Litterman ile Entegre Et
+    bl_views = {}
+    if use_ai_views and gemini_api_key:
+        ai_dict = get_gemini_market_views(list(returns_df.columns), gemini_api_key)
+        if ai_dict:
+            bl_views = ai_dict
+
     if bl_views:
         blended_series = apply_black_litterman_views(
             blended_series, hybrid_cov_df, bl_views
@@ -301,6 +345,7 @@ def calculate_master_integrated_opt(
         effective_rf,
         adjusted_returns,
         ou_sim,
+        bl_views,
     )
 
 
@@ -462,19 +507,10 @@ if use_sukuk and sukuk_tickers_input:
         [t.strip() for t in sukuk_tickers_input.split(",") if t.strip()]
     )
 
-# Yeni Özellik: Black-Litterman Yatırımcı Görüşleri Girişi
-st.sidebar.title("🧠 Black-Litterman Görüşleri")
-use_bl = st.sidebar.checkbox("Özel Getiri Beklentisi Tanımla", value=False)
-bl_views = {}
-if use_bl:
-    view_ticker = st.sidebar.selectbox(
-        "Hedef Varlık", selected_tickers if selected_tickers else [""]
-    )
-    view_expected_return = st.sidebar.number_input(
-        "Öngörülen Yıllık Getiri (%)", value=30.0, step=5.0
-    )
-    if view_ticker:
-        bl_views[view_ticker] = view_expected_return / 100.0
+# Gemini AI Entegrasyon Kontrolleri (Black-Litterman için)
+st.sidebar.title("🤖 Gemini AI & Black-Litterman")
+use_ai_views = st.sidebar.checkbox("Gemini AI ile İleri Dönük Görüşleri Entegre Et", value=False)
+gemini_api_key = st.sidebar.text_input("Google Gemini API Key", type="password", help="Google AI Studio'dan aldığınız ücretsiz API anahtarınızı buraya girin.")
 
 st.sidebar.divider()
 run_opt_btn = st.sidebar.button(
@@ -511,13 +547,14 @@ asset_betas = {
     for t in returns_df.columns
 }
 
-# MASTER OPTİMİZASYON
+# MASTER OPTİMİZASYON (GEMINI AI DAHİL)
 (
     optimal_weights,
     hybrid_cov_df,
     effective_rf,
     adjusted_returns,
     ou_sim_paths,
+    ai_applied_views,
 ) = calculate_master_integrated_opt(
     returns_df,
     base_rf=base_rf,
@@ -525,7 +562,8 @@ asset_betas = {
     dcf_potentials=dcf_potentials,
     max_asset_cap=max_asset_cap,
     max_bist_cap=max_bist_cap,
-    bl_views=bl_views,
+    gemini_api_key=gemini_api_key,
+    use_ai_views=use_ai_views,
 )
 
 metrics = calculate_advanced_metrics(
@@ -542,10 +580,16 @@ kelly_size = calculate_fractional_kelly(
 
 st.info(
     f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
-    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + EBITDA Penalty + DCF + BL) | "
+    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + DCF + {'Gemini AI Black-Litterman' if use_ai_views else 'Klasik'}) | "
     f"**$R_f$:** **%{effective_rf*100:.2f}** | "
     f"**Tek Varlık / BİST Sınırı:** %{max_asset_cap*100:.0f} / %{max_bist_cap*100:.0f}"
 )
+
+# AI Görüşleri Paneli (Eğer aktifse)
+if use_ai_views and ai_applied_views:
+    with st.expander("🤖 Gemini AI 1 Yıllık Öngörü ve Black-Litterman Detayları"):
+        st.write("Yapay zekanın varlıklar için ürettiği 1 yıllık getiri beklentileri ($Q$) ve Black-Litterman entegrasyon sonuçları:")
+        st.json(ai_applied_views)
 
 # ==========================================
 # 1. GENİŞ PORTFÖY ÖZETLERİ & METRİKLER
@@ -872,7 +916,7 @@ with q_tab4:
     )
     st.plotly_chart(fig_ou, use_container_width=True)
 
-# YENİ EKLENEN SEKME 5: Backtest Analizi
+# SEKMELER 5: Backtest Analizi
 with q_tab5:
     st.subheader("🔙 Geçmişe Dönük Portföy Performans Backtesti")
     st.write(
@@ -894,7 +938,6 @@ with q_tab5:
         )
     )
 
-    # Benchmark ekleme (Eğer SPY veya başka bir varlık varsa)
     benchmark_ticker = "SPY" if "SPY" in raw_price_df.columns else raw_price_df.columns[0]
     if benchmark_ticker in raw_price_df.columns:
         bench_cum = (
@@ -918,7 +961,7 @@ with q_tab5:
     )
     st.plotly_chart(fig_backtest, use_container_width=True)
 
-# YENİ EKLENEN SEKME 6: Stres Testi (Kriz Senaryoları)
+# SEKMELER 6: Stres Testi (Kriz Senaryoları)
 with q_tab6:
     st.subheader("⚡ Portföy Kriz Stres Testi (Stress Testing)")
     st.write(
@@ -927,14 +970,11 @@ with q_tab6:
 
     col_s1, col_s2, col_s3 = st.columns(3)
 
-    # Senaryo 1: Genel Piyasa %20 Düşüşü
     shock_market = -0.20
     portfolio_shock_loss = shock_market * port_beta * (budget * kelly_size)
 
-    # Senaryo 2: Faizlerin Ani 500 Baz Puan Artışı
     shock_rate = -0.08 * (budget * kelly_size)
 
-    # Senaryo 3: Döviz / Kur Krizi (Eğer USD bazlı varlıklar varsa pozitif etkilenme)
     shock_fx = (
         0.15 * sum(optimal_weights[t] for t in returns_df.columns if not t.endswith(".IS"))
         * (budget * kelly_size)
