@@ -30,11 +30,7 @@ GLOBAL_CONFIG = {
 
 
 class FinancialDataIngestor:
-    """BIST ve Global hisseler için zaman serisi ve bilanço kalemlerini üreten/çeken modül.
-
-    (Örnek ortamda API bağımlılığı olmadan %100 uçtan uca çalışması için gelişmiş
-    Monte Carlo & Bilanço simülatörü entegredir).
-    """
+    """BIST ve Global hisseler için zaman serisi ve bilanço kalemlerini üreten/çeken modül."""
 
     def __init__(self, tickers, start_date="2024-01-01", end_date="2026-08-11"):
         self.tickers = tickers
@@ -50,23 +46,19 @@ class FinancialDataIngestor:
         num_days = len(dates)
         num_assets = len(self.tickers)
 
-        # Drift ve Volatilite Parametreleri
         drifts = np.random.uniform(0.0003, 0.0012, size=num_assets)
         vols = np.random.uniform(0.012, 0.028, size=num_assets)
 
-        # Rastgele Pozitif Yarı Tanımlı Korelasyon Matrisi
         raw_cov = np.random.uniform(0.15, 0.55, size=(num_assets, num_assets))
         cov_matrix = (raw_cov + raw_cov.T) / 2
         np.fill_diagonal(cov_matrix, 1.0)
 
-        # Cholesky Ayrışımı ile Korele Şoklar
         L = np.linalg.cholesky(cov_matrix)
         uncorrelated_shocks = np.random.normal(
             0, 1, size=(num_days, num_assets)
         )
         correlated_shocks = np.dot(uncorrelated_shocks, L.T)
 
-        # Getiri Matrisi
         daily_returns = drifts + correlated_shocks * vols
         returns_df = pd.DataFrame(
             daily_returns, index=dates, columns=self.tickers
@@ -87,7 +79,6 @@ class FinancialDataIngestor:
 
         for t in self.tickers:
             is_bist = t.endswith(".IS")
-            # BIST hisseleri ve ABD Hisseleri çarpan dinamikleri
             pe_ratios[t] = (
                 np.random.uniform(4.5, 18.0)
                 if is_bist
@@ -104,12 +95,10 @@ class FinancialDataIngestor:
                 else np.random.uniform(8.0, 22.0)
             )
 
-            # Büyüme ve Marj Kalitesi
             ebit_growths[t] = np.random.uniform(-0.15, 0.75)
             ebitda_growths[t] = np.random.uniform(-0.10, 0.65)
             ebitda_margins[t] = np.random.uniform(0.08, 0.42)
 
-            # DCF Getiri Beklentisi (Yıllık %10 ile %80 arası)
             dcf_potentials[t] = np.random.uniform(0.10, 0.80)
 
         return {
@@ -142,11 +131,9 @@ class AdvancedRiskEngine:
         self.lambda_ridge = lambda_ridge
 
     def calculate_historical_cov(self):
-        """252 günlük yıllıklandırılmış klasik örneklem kovaryansı."""
         return self.returns_df.cov() * GLOBAL_CONFIG["TRADING_DAYS_YEAR"]
 
     def calculate_ewma_cov(self):
-        """Üstel ağırlıklı hareketli ortalama (EWMA) kovaryansı."""
         ewma = (
             self.returns_df.ewm(span=self.ewma_span)
             .cov()
@@ -158,7 +145,6 @@ class AdvancedRiskEngine:
         )
 
     def build_hybrid_covariance_matrix(self):
-        """EWMA ve Sample Covariance'ı birleştirip Ridge Regularization ekler."""
         sample_cov = self.calculate_historical_cov()
         ewma_cov = self.calculate_ewma_cov()
 
@@ -166,7 +152,6 @@ class AdvancedRiskEngine:
             (1.0 - self.garch_weight) * sample_cov.values
         )
 
-        # Matris Tersi Alınabilirliğini (Positive Semi-Definite) Garanti Etme
         robust_cov = hybrid_values + np.eye(self.num_assets) * self.lambda_ridge
 
         return pd.DataFrame(
@@ -174,7 +159,6 @@ class AdvancedRiskEngine:
         )
 
     def compute_asset_volatilities(self):
-        """Her bir varlığın tekil yıllıklandırılmış volatilite değerleri."""
         cov_df = self.build_hybrid_covariance_matrix()
         vols = np.sqrt(np.diag(cov_df.values))
         return pd.Series(vols, index=self.tickers)
@@ -186,10 +170,7 @@ class AdvancedRiskEngine:
 
 
 class StochasticMacroEngine:
-    """Risk-Free Rate (Rf) için Vasicek / Ornstein-Uhlenbeck stochastic differential equation simülatörü.
-
-    Formül: $dr_t = \kappa (\theta - r_t) dt + \sigma dW_t$
-    """
+    """Risk-Free Rate (Rf) için Vasicek / Ornstein-Uhlenbeck stochastic differential equation simülatörü."""
 
     @staticmethod
     def run_ornstein_uhlenbeck(
@@ -218,7 +199,6 @@ class StochasticMacroEngine:
 
     @staticmethod
     def extract_effective_rf(simulated_paths):
-        """Monte Carlo simülasyon patikalarından beklenen ortalama faiz oranını çeker."""
         return float(np.mean(simulated_paths[-1, :]))
 
 
@@ -239,7 +219,6 @@ class FundamentalCatalystEngine:
         self.ebitda_margins = fundamental_data.get("ebitda_margins", {})
 
     def calculate_valuation_score(self, ticker):
-        """Çarpan Skorlaması (%35 Ağırlık)."""
         pe = self.pe_ratios.get(ticker, 12.0)
         pb = self.pb_ratios.get(ticker, 2.0)
         ev_ebitda = self.ev_ebitda_ratios.get(ticker, 8.0)
@@ -251,7 +230,6 @@ class FundamentalCatalystEngine:
         return (pe_score * 0.35) + (pb_score * 0.30) + (ev_score * 0.35)
 
     def calculate_growth_score(self, ticker):
-        """Operasyonel Büyüme Skorlaması (%40 Ağırlık)."""
         ebit_growth = self.ebit_growths.get(ticker, 0.15)
         ebitda_growth = self.ebitda_growths.get(ticker, 0.15)
 
@@ -261,12 +239,10 @@ class FundamentalCatalystEngine:
         return (ebit_score * 0.50) + (ebitda_score * 0.50)
 
     def calculate_margin_score(self, ticker):
-        """Marj Kalite Skorlaması (%25 Ağırlık)."""
         ebitda_margin = self.ebitda_margins.get(ticker, 0.20)
         return np.clip((ebitda_margin - 0.15) / 0.20, -0.5, 0.5)
 
     def generate_all_catalyst_premiums(self):
-        """Tüm tickers için ilave getiri primi (Alfa) üretir (%-12 ile %+20)."""
         premiums = {}
         for ticker in self.pe_ratios.keys():
             v_score = self.calculate_valuation_score(ticker)
@@ -277,7 +253,6 @@ class FundamentalCatalystEngine:
                 (v_score * 0.35) + (g_score * 0.40) + (m_score * 0.25)
             )
 
-            # Getiri Primine Dönüştür
             premiums[ticker] = np.clip(total_catalyst * 0.18, -0.12, 0.20)
 
         return premiums
@@ -291,7 +266,6 @@ class FundamentalCatalystEngine:
 def apply_ebitda_margin_penalty(
     blended_returns, ebitda_margins, benchmark_margin=0.15
 ):
-    """EBITDA marjı düşük şirketlerin beklenen getirisine ceza, yüksek olanlara prim uygular."""
     adjusted = {}
     for ticker, ret in blended_returns.items():
         margin = ebitda_margins.get(ticker, benchmark_margin)
@@ -323,14 +297,12 @@ def calculate_master_integrated_opt(
     max_asset_cap=GLOBAL_CONFIG["DEFAULT_MAX_WEIGHT"],
     max_bist_cap=GLOBAL_CONFIG["DEFAULT_MAX_BIST_CAP"],
 ):
-    """Fon Usulü Entegre Quantamental + Operasyonel Katalizör Portföy Optimizasyonu."""
     raw_mean_returns = (
         returns_df.mean() * GLOBAL_CONFIG["TRADING_DAYS_YEAR"]
     )
     num_assets = len(raw_mean_returns)
     tickers = returns_df.columns
 
-    # Varsayılan Değer Atamaları (Sistemi Hatalara Karşı Korur)
     if ebitda_margins is None:
         ebitda_margins = {t: 0.20 for t in tickers}
     if dcf_potentials is None:
@@ -346,13 +318,11 @@ def calculate_master_integrated_opt(
     if ebitda_growths is None:
         ebitda_growths = {t: 0.15 for t in tickers}
 
-    # 1. Makro Faiz Simülasyonu
     ou_sim_paths = StochasticMacroEngine.run_ornstein_uhlenbeck(
         initial_rate=base_rf, target_rate=base_rf * 0.85
     )
     effective_rf = StochasticMacroEngine.extract_effective_rf(ou_sim_paths)
 
-    # 2. Operasyonel & Temel Katalizör Skorları
     fund_data = {
         "pe_ratios": pe_ratios,
         "pb_ratios": pb_ratios,
@@ -364,7 +334,6 @@ def calculate_master_integrated_opt(
     cat_engine = FundamentalCatalystEngine(fund_data)
     catalyst_premiums = cat_engine.generate_all_catalyst_premiums()
 
-    # 3. Triple Hybrid Return Blending (Quant %45 + DCF %30 + Katalizör %25)
     blended_returns = {}
     for t in tickers:
         quant_ret = raw_mean_returns[t]
@@ -375,21 +344,17 @@ def calculate_master_integrated_opt(
             (quant_ret * 0.45) + (dcf_pot * 0.30) + (cat_prem)
         )
 
-    # 4. EBITDA Marjı Cezalandırma Düzeltmesi
     adjusted_returns_dict = apply_ebitda_margin_penalty(
         blended_returns, ebitda_margins
     )
     adjusted_returns = pd.Series(adjusted_returns_dict)
 
-    # 5. Risk Kovaryans Matrisi
     risk_engine = AdvancedRiskEngine(returns_df)
     hybrid_cov_df = risk_engine.build_hybrid_covariance_matrix()
     cov_values = hybrid_cov_df.values
 
-    # 6. Optimizasyon Kısıtları (Constraints & Bounds)
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
-    # BIST Ülke Sınırı Kısıtı
     bist_indices = [
         i for i, col in enumerate(returns_df.columns) if col.endswith(".IS")
     ]
@@ -402,19 +367,16 @@ def calculate_master_integrated_opt(
             }
         )
 
-    # Varlık Başı Taban (%1.5) ve Tavan (%25) Sınırları
     bounds = tuple(
         (float(min_asset_floor), float(max_asset_cap))
         for _ in range(num_assets)
     )
     initial_weights = np.ones(num_assets) / num_assets
 
-    # 7. Multi-Objective Master Objective Function
     def master_objective(weights):
         p_ret = np.dot(weights, adjusted_returns.values)
         p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_values, weights)))
 
-        # Günlük Portföy Getirilerinden Kuyruk Riski (CVaR / Expected Shortfall)
         port_daily_ret = returns_df.dot(weights)
         var_95 = np.percentile(port_daily_ret, 5)
         tail_losses = port_daily_ret[port_daily_ret <= var_95]
@@ -425,17 +387,12 @@ def calculate_master_integrated_opt(
         if p_vol == 0 or cvar_tail == 0:
             return 1e6
 
-        # Entegre Sharpe
         sharpe = (p_ret - effective_rf) / p_vol
         cvar_penalty = cvar_tail * np.sqrt(GLOBAL_CONFIG["TRADING_DAYS_YEAR"])
-
-        # Herfindahl-Hirschman İndeksi (HHI) - Aşırı Yoğunlaşmayı Cezalandırır
         hhi_penalty = np.sum(weights**2)
 
-        # Minimize Edilecek Fonksiyon (Eksi Sharpe + Risk Cezaları)
         return -(sharpe - 0.5 * cvar_penalty - 0.1 * hhi_penalty)
 
-    # SLSQP Algoritmasını Çalıştır
     opt_res = minimize(
         master_objective,
         initial_weights,
@@ -445,7 +402,6 @@ def calculate_master_integrated_opt(
         options={"maxiter": 1000, "ftol": 1e-9},
     )
 
-    # Ağırlıkları Süz ve Normalize Et
     opt_w = np.maximum(opt_res.x, 0.0)
     opt_w = opt_w / np.sum(opt_w)
 
@@ -485,7 +441,6 @@ class PortfolioAnalytics:
         return (p_ret - self.rf) / p_vol if p_vol > 0 else 0.0
 
     def calculate_historical_var_cvar(self, alpha=0.95):
-        """Tarihsel Value at Risk (VaR) ve Conditional VaR (CVaR)."""
         cutoff_percentile = (1 - alpha) * 100
         var_daily = np.percentile(
             self.daily_portfolio_returns, cutoff_percentile
@@ -499,19 +454,17 @@ class PortfolioAnalytics:
         return abs(var_daily) * ann_factor, abs(cvar_daily) * ann_factor
 
     def calculate_max_drawdown(self):
-        """Maksimum Sermaye Kaybı (Max Drawdown) Hesabı."""
         cum_returns = (1 + self.daily_portfolio_returns).cumprod()
         peak = cum_returns.cummax()
         drawdown = (cum_returns - peak) / peak
         return abs(drawdown.min())
 
     def calculate_diversification_index(self):
-        """Herfindahl-Hirschman Index (HHI)."""
         return np.sum(self.weights**2)
 
 
 # ==============================================================================
-# 9. ADVANCED GRAPHICS & VISUALIZATION ENGINE
+# 9. ADVANCED GRAPHICS & VISUALIZATION ENGINE (DÜZELTİLDİ VE ENTEGRE EDİLDİ)
 # ==============================================================================
 
 
@@ -543,24 +496,26 @@ class QuantTerminalVisualizer:
             fontsize=12,
             fontweight="bold",
         )
-        ax1.set_ylabel("Ağırlık (% Ratio)")
+        ax1.set_ylabel("Ağırlık Oranı")
         ax1.grid(True, linestyle="--", alpha=0.5)
 
-        # 2. Panel: Riski Getiri Profil Karşılaştırması
+        # 2. Panel: Risk vs Getiri Profil Karşılaştırması
         ax2 = axes[0, 1]
         vols = np.sqrt(np.diag(cov_df.values))
         ax2.scatter(
             vols * 100,
-            adjusted_returns * 100,
+            adjusted_returns.values * 100,
             color="red",
             s=80,
             alpha=0.7,
             label="Bireysel Hisseler",
         )
+
+        # DÜZELTİLEN KISIM: adjusted_returns[txt] kullanılarak KeyError engellendi
         for i, txt in enumerate(weights.index):
             ax2.annotate(
                 txt,
-                (vols[i] * 100 + 0.3, adjusted_returns[i] * 100),
+                (vols[i] * 100 + 0.3, adjusted_returns[txt] * 100),
                 fontsize=8,
             )
 
@@ -599,7 +554,7 @@ class QuantTerminalVisualizer:
             fontweight="bold",
         )
         ax3.set_xlabel("İş Günü (252 Gün)")
-        ax3.set_ylabel("Faiz Oranı (Oran)")
+        ax3.set_ylabel("Faiz Oranı")
         ax3.legend()
         ax3.grid(True, linestyle="--", alpha=0.5)
 
@@ -628,7 +583,14 @@ class QuantTerminalVisualizer:
             fontsize=16,
             fontweight="bold",
         )
-        plt.show()
+
+        # Streamlit ve Standalone (Konsol) Uyumlu Çıktı
+        try:
+            import streamlit as st
+
+            st.pyplot(fig)
+        except ImportError:
+            plt.show()
 
 
 # ==============================================================================
@@ -665,7 +627,6 @@ class QuantTerminalReporter:
         )
         print("=" * 80)
 
-        # Tablo Oluşturma
         df_summary = pd.DataFrame(
             {
                 "Ağırlık (%)": (weights * 100).round(2),
@@ -722,7 +683,6 @@ if __name__ == "__main__":
         "⚡ Quantamental Portfolio Terminal Başlatılıyor... Veriler Hazırlanıyor..."
     )
 
-    # Portföye Alınacak Aday Hisseler (BIST + Global)
     target_tickers = [
         "THYAO.IS",
         "GARAN.IS",
@@ -735,7 +695,6 @@ if __name__ == "__main__":
         "AMZN",
     ]
 
-    # Data Ingestion
     ingestor = FinancialDataIngestor(
         target_tickers, start_date="2024-01-01", end_date="2026-08-11"
     )
@@ -744,7 +703,6 @@ if __name__ == "__main__":
 
     print("⚙️  GARCH/EWMA Kovaryans ve SLSQP Optimizasyon Motoru Çalıştırılıyor...")
 
-    # Ana Optimizasyon Çağrısı
     (
         opt_weights,
         hybrid_cov,
@@ -766,7 +724,6 @@ if __name__ == "__main__":
         max_bist_cap=GLOBAL_CONFIG["DEFAULT_MAX_BIST_CAP"],
     )
 
-    # Analiz ve Raporlama
     analytics = PortfolioAnalytics(
         opt_weights, returns_dataframe, hybrid_cov, effective_rf
     )
@@ -781,7 +738,6 @@ if __name__ == "__main__":
         analytics=analytics,
     )
 
-    # Grafik Gösterge Paneli
     analytics_summary = {
         "return": analytics.calculate_annualized_return(adjusted_returns),
         "volatility": analytics.calculate_annualized_volatility(),
