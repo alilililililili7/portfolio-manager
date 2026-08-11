@@ -17,7 +17,7 @@ except ImportError:
     ARCH_AVAILABLE = False
 
 st.set_page_config(
-    page_title="Gelişmiş Multi-Currency Portföy Engine",
+    page_title="Gelişmiş Multi-Currency Quant Portföy Engine",
     layout="wide",
     page_icon="🏛️",
 )
@@ -28,11 +28,7 @@ st.set_page_config(
 
 
 def fetch_and_convert_data(tickers, base_currency="TRY (₺)", period="3y"):
-    """
-    Kullanıcının seçtiği baz para birimine göre (TL veya USD):
-    - TL Seçildiyse: USD varlıkları USD/TRY kuruyla ÇARPAR.
-    - USD Seçildiyse: TL varlıkları TRY/USD kuruyla ÇARPAR.
-    """
+    """Kullanıcının seçtiği baz para birimine göre (TL veya USD) verileri çeker ve dönüştürür."""
     if not tickers:
         return pd.DataFrame()
 
@@ -101,10 +97,7 @@ def run_garch_volatility(returns_series):
 
 
 def build_hybrid_cov_matrix(returns_df):
-    """
-    GARCH(1,1) İleri Volatiliteler + EWMA Dinamik Korelasyon Matrisini
-    birleştirerek TEK HİBRİT KOVARYANS MATRİSİ oluşturur.
-    """
+    """GARCH(1,1) İleri Volatiliteler + EWMA Dinamik Korelasyon Matrisi."""
     ewma_cov = calculate_ewma_cov(returns_df)
     vols = np.sqrt(np.diag(ewma_cov))
     vols[vols == 0] = 1e-6
@@ -122,9 +115,12 @@ def build_hybrid_cov_matrix(returns_df):
 
 
 def run_ornstein_uhlenbeck(
-    initial_rate, target_rate=0.35, theta=0.15, sigma=0.04, days=252, N=50
+    initial_rate, target_rate=None, theta=0.15, sigma=0.01, days=252, N=50
 ):
-    """Faiz Oranı Mean-Reversion Simülasyonu."""
+    """Girdiye tam bağlı dinamik Ornstein-Uhlenbeck / Vasicek Faiz Simülasyonu."""
+    if target_rate is None:
+        target_rate = initial_rate
+
     dt = 1 / days
     rates = np.zeros((days, N))
     rates[0, :] = initial_rate
@@ -139,30 +135,77 @@ def run_ornstein_uhlenbeck(
     return rates
 
 
+def apply_ebitda_margin_penalty(
+    expected_returns, ebitda_margins, min_threshold=0.15, max_penalty=0.40
+):
+    """EBITDA marjı düşük hisselerin getirisini matematiksel olarak cezalandırır/azaltır."""
+    adjusted_returns = expected_returns.copy()
+    for ticker, mu in expected_returns.items():
+        margin = ebitda_margins.get(ticker, 0.20)
+        if margin < min_threshold:
+            penalty_ratio = (min_threshold - margin) / min_threshold
+            penalty = min(penalty_ratio * max_penalty, max_penalty)
+            adjusted_returns[ticker] = mu * (1.0 - penalty)
+    return adjusted_returns
+
+
+def calculate_portfolio_beta(weights, asset_betas):
+    """Portföyün toplam piyasa duyarlılığını (Beta) hesaplar."""
+    return sum(weights[ticker] * asset_betas.get(ticker, 1.0) for ticker in weights.index)
+
+
+def calculate_fractional_kelly(
+    portfolio_return, portfolio_vol, risk_free_rate, fraction=0.5
+):
+    """Fractional Kelly Kriteri ile optimal pozisyon büyüklüğü."""
+    if portfolio_vol == 0:
+        return 1.0
+    full_kelly = (portfolio_return - risk_free_rate) / (portfolio_vol**2)
+    return float(np.clip(full_kelly * fraction, 0.10, 1.0))
+
+
 def calculate_master_integrated_opt(
     returns_df,
     base_rf=0.45,
+    ebitda_margins=None,
+    dcf_potentials=None,
     max_asset_cap=0.25,
     max_bist_cap=0.50,
 ):
-    """
-    HEPSİ TEK ÇATI ALTINDA:
-    GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz + Kısıtlar
-    harmanlanarak TEK BİR OPTİMUM AĞIRLIK SETİ üretilir.
-    """
-    mean_returns = returns_df.mean() * 252
-    num_assets = len(mean_returns)
+    """GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz + EBITDA Cezalandırması + DCF Blend."""
+    raw_mean_returns = returns_df.mean() * 252
+    num_assets = len(raw_mean_returns)
 
-    # 1. OU Dinamik Faiz Entegrasyonu
-    ou_sim = run_ornstein_uhlenbeck(initial_rate=base_rf, days=252, N=50)
+    if ebitda_margins is None:
+        ebitda_margins = {t: 0.20 for t in returns_df.columns}
+    if dcf_potentials is None:
+        dcf_potentials = raw_mean_returns.to_dict()
+
+    # 1. OU Dinamik Faiz Entegrasyonu (Kullanıcının Seçtiği Faize Sadık)
+    ou_sim = run_ornstein_uhlenbeck(
+        initial_rate=base_rf, target_rate=base_rf, days=252, N=50
+    )
     effective_rf = float(np.mean(ou_sim))
 
-    # 2. GARCH + EWMA Hibrit Kovaryans Matrisi
+    # 2. DCF + Quant (Black-Litterman Benzeri) Getiri Harmanlama
+    blended_returns = {}
+    for t in returns_df.columns:
+        quant_ret = raw_mean_returns[t]
+        dcf_pot = dcf_potentials.get(t, quant_ret)
+        blended_returns[t] = (quant_ret * 0.70) + (dcf_pot * 0.30)
+
+    # 3. EBITDA Marjına Göre Getiriyi Azaltma (Cezalandırma)
+    adjusted_returns_dict = apply_ebitda_margin_penalty(
+        blended_returns, ebitda_margins
+    )
+    adjusted_returns = pd.Series(adjusted_returns_dict)
+
+    # 4. GARCH + EWMA Hibrit Kovaryans Matrisi
     hybrid_cov_df = build_hybrid_cov_matrix(returns_df)
     lambda_ridge = 1e-4
     cov_values = hybrid_cov_df.values + np.eye(num_assets) * lambda_ridge
 
-    # 3. Kısıtlar (Sektör & Varlık Cap)
+    # 5. Kısıtlar
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
     bist_indices = [
@@ -180,12 +223,11 @@ def calculate_master_integrated_opt(
     bounds = tuple((0.0, float(max_asset_cap)) for _ in range(num_assets))
     initial_weights = np.ones(num_assets) / num_assets
 
-    # 4. Hibrit Amaç Fonksiyonu (Sharpe + Tail Risk CVaR Penalty)
+    # 6. Amaç Fonksiyonu (Sharpe + CVaR Penalty)
     def master_objective(weights):
-        p_ret = np.dot(weights, mean_returns)
+        p_ret = np.dot(weights, adjusted_returns.values)
         p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_values, weights)))
 
-        # CVaR (Kuyruk Riski) Hesaplama
         port_daily = returns_df.dot(weights)
         var_95 = np.percentile(port_daily, 5)
         cvar_tail = abs(port_daily[port_daily <= var_95].mean())
@@ -196,7 +238,6 @@ def calculate_master_integrated_opt(
         sharpe = (p_ret - effective_rf) / p_vol
         cvar_penalty = cvar_tail * np.sqrt(252)
 
-        # Hem Sharpe'ı max et hem CVaR kuyruk riskini minimize et
         return -(sharpe - 0.5 * cvar_penalty)
 
     opt_res = minimize(
@@ -214,10 +255,14 @@ def calculate_master_integrated_opt(
         pd.Series(opt_w, index=returns_df.columns),
         hybrid_cov_df,
         effective_rf,
+        adjusted_returns,
+        ou_sim,
     )
 
 
-def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
+def calculate_advanced_metrics(
+    returns_df, weights, adjusted_returns, risk_free_rate=0.45
+):
     """VaR, CVaR, Skewness, Kurtosis ve Sharpe analizi."""
     port_daily_returns = returns_df.dot(weights)
 
@@ -228,7 +273,7 @@ def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
     cvar_tail = port_daily_returns[port_daily_returns <= var_95]
     cvar_95 = cvar_tail.mean() if len(cvar_tail) > 0 else var_95
 
-    ann_return = port_daily_returns.mean() * 252
+    ann_return = np.dot(weights, adjusted_returns.values)
     ann_vol = port_daily_returns.std() * np.sqrt(252)
     sharpe = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else 0
 
@@ -297,7 +342,7 @@ rf_tl_input = (
     col_rf1.number_input("TL Faiz / Mevduat (%)", value=45.0, step=1.0) / 100.0
 )
 rf_usd_input = (
-    col_rf2.number_input("USD Faiz / SOFR (%)", value=5.0, step=0.5) / 100.0
+    col_rf2.number_input("USD Faiz / SOFR (%)", value=3.75, step=0.25) / 100.0
 )
 
 base_rf = rf_tl_input if "TRY" in base_currency else rf_usd_input
@@ -397,44 +442,83 @@ if returns_df.empty or len(returns_df.columns) < 2:
     )
     st.stop()
 
+# EBITDA, DCF & Beta Mock/Hesaplama Matrisleri (Geliştirilebilir Data-Feed)
+ebitda_margins = {
+    t: 0.08 if "BIMAS" in t else (0.12 if "EREGL" in t else 0.25)
+    for t in returns_df.columns
+}
+dcf_potentials = (returns_df.mean() * 252 * 1.1).to_dict()  # %10 DCF primi
+asset_betas = {
+    t: (0.85 if t in ["SPY", "VOO"] else (1.20 if t.endswith(".IS") else 0.60))
+    for t in returns_df.columns
+}
+
 # HEPSİ BİR ARADA MASTER OPTİMİZASYON
-optimal_weights, hybrid_cov_df, effective_rf = (
-    calculate_master_integrated_opt(
-        returns_df,
-        base_rf=base_rf,
-        max_asset_cap=max_asset_cap,
-        max_bist_cap=max_bist_cap,
-    )
+(
+    optimal_weights,
+    hybrid_cov_df,
+    effective_rf,
+    adjusted_returns,
+    ou_sim_paths,
+) = calculate_master_integrated_opt(
+    returns_df,
+    base_rf=base_rf,
+    ebitda_margins=ebitda_margins,
+    dcf_potentials=dcf_potentials,
+    max_asset_cap=max_asset_cap,
+    max_bist_cap=max_bist_cap,
 )
 
 metrics = calculate_advanced_metrics(
-    returns_df, optimal_weights, risk_free_rate=effective_rf
+    returns_df,
+    optimal_weights,
+    adjusted_returns,
+    risk_free_rate=effective_rf,
+)
+
+port_beta = calculate_portfolio_beta(optimal_weights, asset_betas)
+kelly_size = calculate_fractional_kelly(
+    metrics["Ann_Return"], metrics["Ann_Vol"], effective_rf, fraction=0.5
 )
 
 st.info(
     f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
-    f"**Model:** Entegre Hibrit (GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz) | "
+    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz + EBITDA Penalty + DCF) | "
     f"**Simüle Dinamik $R_f$:** **%{effective_rf*100:.2f}** | "
     f"**Tek Varlık / BİST Sınırı:** %{max_asset_cap*100:.0f} / %{max_bist_cap*100:.0f}"
 )
 
 # ==========================================
-# 1. GENİŞ PORTFÖY ÖZETLERİ
+# 1. GENİŞ PORTFÖY ÖZETLERİ & METRİKLER
 # ==========================================
 st.subheader(f"📌 1. Optimum Portföy Genel Özeti ({curr_symbol} Bazlı)")
 
-col1, col2, col3, col4 = st.columns(4)
+col1, col2, col3, col4, col5 = st.columns(5)
 col1.metric("Toplam Bütçe", f"{curr_symbol}{budget:,.2f}")
 col2.metric("Beklenen Yıllık Getiri", f"%{metrics['Ann_Return']*100:.2f}")
 col3.metric("Portföy Volatilite (Risk)", f"%{metrics['Ann_Vol']*100:.2f}")
 col4.metric("Sharpe Oranı", f"{metrics['Sharpe']:.2f}")
+col5.metric("Portföy Betası", f"{port_beta:.2f}")
+
+# Kelly Position Size Görselleştirme
+st.markdown("##### 🎯 Dynamic Position Size (Kelly Kriteri & Nakit Tamponu)")
+k_col1, k_col2 = st.columns([1.5, 2.5])
+with k_col1:
+    st.write(
+        f"**Hissede Kalınacak Tutar:** %{kelly_size*100:.1f} ({curr_symbol}{budget*kelly_size:,.2f})"
+    )
+    st.write(
+        f"**Nakit/Mevduat Tamponu:** %{(1-kelly_size)*100:.1f} ({curr_symbol}{budget*(1-kelly_size):,.2f})"
+    )
+with k_col2:
+    st.progress(kelly_size)
 
 st.divider()
 
 # ==========================================
 # 2. SEKTÖR / KATEGORİ VE VARLIK TABLOSU
 # ==========================================
-col_left, col_right = st.columns([1.2, 1])
+col_left, col_right = st.columns([1.3, 1])
 
 with col_left:
     st.subheader("📋 2. Sektör & Kategori Bazlı Dağılım")
@@ -462,7 +546,7 @@ with col_left:
             "Kategori": categories,
             "Optimal Ağırlık (%)": (optimal_weights.values * 100).round(2),
             f"Yatırılacak Tutar ({curr_symbol})": (
-                optimal_weights.values * budget
+                optimal_weights.values * (budget * kelly_size)
             ).round(2),
         }
     )
@@ -488,13 +572,13 @@ with col_right:
     fig_donut.update_traces(textposition="inside", textinfo="percent+label")
     st.plotly_chart(fig_donut, use_container_width=True)
 
-# 3. Varlık Bazlı Detay Tablosu
+# 3. Varlık Bazlı Detay Tablosu (EBITDA & Beta Dahil)
 st.subheader(
     f"📋 3. Varlık Bazlı Detay Tablosu ({base_currency.split(' ')[0]} Bazında)"
 )
 asset_details = []
 for ticker in returns_df.columns:
-    ann_ret = returns_df[ticker].mean() * 252
+    ann_ret = adjusted_returns[ticker]
     ann_vol = returns_df[ticker].std() * np.sqrt(252)
     w = optimal_weights[ticker]
     asset_details.append(
@@ -503,10 +587,14 @@ for ticker in returns_df.columns:
             "Kategori": alloc_df.loc[
                 alloc_df["Ticker"] == ticker, "Kategori"
             ].values[0],
-            f"Yıllık Beklenen Getiri ({curr_symbol} %)": round(ann_ret * 100, 2),
+            "EBITDA Marjı (%)": round(ebitda_margins.get(ticker, 0.20) * 100, 1),
+            "Beta": round(asset_betas.get(ticker, 1.0), 2),
+            f"Düzeltilmiş $µ$ Getiri ({curr_symbol} %)": round(ann_ret * 100, 2),
             "Bireysel Volatilite (Risk %)": round(ann_vol * 100, 2),
             "Optimal Ağırlık (%)": round(w * 100, 2),
-            f"Yatırılacak Tutar ({curr_symbol})": round(w * budget, 2),
+            f"Yatırılacak Tutar ({curr_symbol})": round(
+                w * (budget * kelly_size), 2
+            ),
         }
     )
 
@@ -611,7 +699,7 @@ with q_tab2:
         "**Cholesky Ayrıştırması** ile varlıkların korelasyon yapısı korunarak **500 Farklı Gelecek Patikası (1 Yıl / 252 Gün)** simüle edilmiştir."
     )
     mc_paths = run_monte_carlo_gbm(
-        returns_df, optimal_weights, budget, days=252, N=500
+        returns_df, optimal_weights, budget * kelly_size, days=252, N=500
     )
 
     fig_mc = go.Figure()
@@ -688,13 +776,12 @@ with q_tab4:
         "**Ornstein-Uhlenbeck / Vasicek Mean-Reverting Faiz Simülasyonu:**"
     )
 
-    target_rate_sim = 0.30 if "TRY" in base_currency else 0.035
-
+    # Kullanıcının seçtiği ve girdiği faiz direkt hedef alınır
     ou_paths = run_ornstein_uhlenbeck(
         initial_rate=base_rf,
-        target_rate=target_rate_sim,
+        target_rate=base_rf,
         theta=0.15,
-        sigma=0.04,
+        sigma=0.01 if "USD" in base_currency else 0.03,
         days=252,
         N=100,
     )
