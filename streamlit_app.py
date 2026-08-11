@@ -1,3 +1,4 @@
+from io import BytesIO
 import numpy as np
 import pandas as pd
 import plotly.express as px
@@ -64,7 +65,7 @@ def fetch_and_convert_data(tickers, base_currency="TRY (₺)", period="3y"):
     returns = (
         converted_data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     )
-    return returns
+    return returns, converted_data
 
 
 def calculate_ewma_cov(returns_df, lambda_param=0.94):
@@ -166,6 +167,40 @@ def calculate_fractional_kelly(
     return float(np.clip(full_kelly * fraction, 0.10, 1.0))
 
 
+def apply_black_litterman_views(
+    prior_returns, cov_matrix, views_dict, tau=0.05
+):
+    """Black-Litterman Modeli ile Yatırımcı Görüşlerini Beklenen Getirilere Entegre Eder."""
+    if not views_dict:
+        return prior_returns
+
+    n = len(prior_returns)
+    P = np.zeros((len(views_dict), n))
+    Q = np.zeros(len(views_dict))
+
+    for idx, (ticker, view_val) in enumerate(views_dict.items()):
+        if ticker in prior_returns.index:
+            col_idx = list(prior_returns.index).get_loc(
+                ticker
+            ) if hasattr(list(prior_returns.index), "get_loc") else list(prior_returns.index).index(ticker)
+            P[idx, col_idx] = 1.0
+            Q[idx] = view_val
+
+    # Omega (Görüş Belirsizliği)
+    omega = np.diag(np.diag(P @ (tau * cov_matrix.values) @ P.T)) * 1e-4
+
+    # Black-Litterman Formülü
+    inv_cov = pinv(tau * cov_matrix.values)
+    inv_omega = pinv(omega) if omega.size > 0 else np.zeros((len(Q), len(Q)))
+
+    middle_inv = pinv(inv_cov + P.T @ inv_omega @ P)
+    bl_returns = middle_inv @ (
+        inv_cov @ prior_returns.values + P.T @ inv_omega @ Q
+    )
+
+    return pd.Series(bl_returns, index=prior_returns.index)
+
+
 def calculate_master_integrated_opt(
     returns_df,
     base_rf=0.45,
@@ -173,8 +208,9 @@ def calculate_master_integrated_opt(
     dcf_potentials=None,
     max_asset_cap=0.25,
     max_bist_cap=0.50,
+    bl_views=None,
 ):
-    """GARCH + EWMA + Mean-CVaR + Birebir Rf Kullanımı + EBITDA Penalty + DCF Blend."""
+    """GARCH + EWMA + Mean-CVaR + Birebir Rf Kullanımı + EBITDA Penalty + DCF Blend + Black-Litterman."""
     raw_mean_returns = returns_df.mean() * 252
     num_assets = len(raw_mean_returns)
 
@@ -183,33 +219,38 @@ def calculate_master_integrated_opt(
     if dcf_potentials is None:
         dcf_potentials = raw_mean_returns.to_dict()
 
-    # 1. BİREBİR KULLANICININ GİRDİĞİ FAİZ ALINIR
     effective_rf = float(base_rf)
 
-    # OU Simülasyonu Sadece Grafik/Görsel Sekme İçin Çalıştırılır
     ou_sim = run_ornstein_uhlenbeck(
         initial_rate=base_rf, target_rate=base_rf, days=252, N=50
     )
 
-    # 2. DCF + Quant (Black-Litterman Benzeri) Getiri Harmanlama
+    # GARCH + EWMA Hibrit Kovaryans Matrisi
+    hybrid_cov_df = build_hybrid_cov_matrix(returns_df)
+    lambda_ridge = 1e-4
+    cov_values = hybrid_cov_df.values + np.eye(num_assets) * lambda_ridge
+
+    # DCF + Quant Harmanlama
     blended_returns = {}
     for t in returns_df.columns:
         quant_ret = raw_mean_returns[t]
         dcf_pot = dcf_potentials.get(t, quant_ret)
         blended_returns[t] = (quant_ret * 0.70) + (dcf_pot * 0.30)
+    blended_series = pd.Series(blended_returns)
 
-    # 3. EBITDA Marjına Göre Getiriyi Azaltma (Cezalandırma)
+    # Black-Litterman Görüşleri Uygulama
+    if bl_views:
+        blended_series = apply_black_litterman_views(
+            blended_series, hybrid_cov_df, bl_views
+        )
+
+    # EBITDA Marjına Göre Getiriyi Azaltma
     adjusted_returns_dict = apply_ebitda_margin_penalty(
-        blended_returns, ebitda_margins
+        blended_series, ebitda_margins
     )
     adjusted_returns = pd.Series(adjusted_returns_dict)
 
-    # 4. GARCH + EWMA Hibrit Kovaryans Matrisi
-    hybrid_cov_df = build_hybrid_cov_matrix(returns_df)
-    lambda_ridge = 1e-4
-    cov_values = hybrid_cov_df.values + np.eye(num_assets) * lambda_ridge
-
-    # 5. Kısıtlar
+    # Kısıtlar
     constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
 
     bist_indices = [
@@ -227,7 +268,6 @@ def calculate_master_integrated_opt(
     bounds = tuple((0.0, float(max_asset_cap)) for _ in range(num_assets))
     initial_weights = np.ones(num_assets) / num_assets
 
-    # 6. Amaç Fonksiyonu (Sharpe + CVaR Penalty)
     def master_objective(weights):
         p_ret = np.dot(weights, adjusted_returns.values)
         p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_values, weights)))
@@ -422,6 +462,20 @@ if use_sukuk and sukuk_tickers_input:
         [t.strip() for t in sukuk_tickers_input.split(",") if t.strip()]
     )
 
+# Yeni Özellik: Black-Litterman Yatırımcı Görüşleri Girişi
+st.sidebar.title("🧠 Black-Litterman Görüşleri")
+use_bl = st.sidebar.checkbox("Özel Getiri Beklentisi Tanımla", value=False)
+bl_views = {}
+if use_bl:
+    view_ticker = st.sidebar.selectbox(
+        "Hedef Varlık", selected_tickers if selected_tickers else [""]
+    )
+    view_expected_return = st.sidebar.number_input(
+        "Öngörülen Yıllık Getiri (%)", value=30.0, step=5.0
+    )
+    if view_ticker:
+        bl_views[view_ticker] = view_expected_return / 100.0
+
 st.sidebar.divider()
 run_opt_btn = st.sidebar.button(
     "🚀 Portföyü Optimize Et", type="primary", use_container_width=True
@@ -436,7 +490,7 @@ if len(selected_tickers) < 2:
     st.warning("Lütfen optimizasyon için en az 2 varlık seçin.")
     st.stop()
 
-returns_df = fetch_and_convert_data(
+returns_df, raw_price_df = fetch_and_convert_data(
     selected_tickers, base_currency=base_currency
 )
 
@@ -471,6 +525,7 @@ asset_betas = {
     dcf_potentials=dcf_potentials,
     max_asset_cap=max_asset_cap,
     max_bist_cap=max_bist_cap,
+    bl_views=bl_views,
 )
 
 metrics = calculate_advanced_metrics(
@@ -487,7 +542,7 @@ kelly_size = calculate_fractional_kelly(
 
 st.info(
     f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
-    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + EBITDA Penalty + DCF) | "
+    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + EBITDA Penalty + DCF + BL) | "
     f"**$R_f$:** **%{effective_rf*100:.2f}** | "
     f"**Tek Varlık / BİST Sınırı:** %{max_asset_cap*100:.0f} / %{max_bist_cap*100:.0f}"
 )
@@ -651,12 +706,14 @@ st.divider()
 # ==========================================
 st.subheader("📊 5. İleri Kantitatif Risk & Simülasyon Motoru")
 
-q_tab1, q_tab2, q_tab3, q_tab4 = st.tabs(
+q_tab1, q_tab2, q_tab3, q_tab4, q_tab5, q_tab6 = st.tabs(
     [
         "⚠️ Risk Metrikleri (VaR/CVaR/Kurtosis)",
         "🎲 Monte Carlo GBM (Cholesky)",
         "📈 GARCH(1,1) Volatilite",
         "🏛️ OU / Vasicek Faiz Simülasyonu",
+        "🔙 Geçmişe Dönük Backtest",
+        "⚡ Kriz Stres Testi",
     ]
 )
 
@@ -814,3 +871,122 @@ with q_tab4:
         yaxis_title="Faiz Oranı (%)",
     )
     st.plotly_chart(fig_ou, use_container_width=True)
+
+# YENİ EKLENEN SEKME 5: Backtest Analizi
+with q_tab5:
+    st.subheader("🔙 Geçmişe Dönük Portföy Performans Backtesti")
+    st.write(
+        "Optimize edilen ağırlıkların geçmiş veriler üzerindeki kümülatif büyüme seyri ve Benchmark (Örn: SPY / XU100) kıyaslaması."
+    )
+
+    portfolio_cum_returns = (1 + returns_df.dot(optimal_weights)).cumprod() * (
+        budget * kelly_size
+    )
+
+    fig_backtest = go.Figure()
+    fig_backtest.add_trace(
+        go.Scatter(
+            x=portfolio_cum_returns.index,
+            y=portfolio_cum_returns.values,
+            mode="lines",
+            name="Quant Optimizasyon Portföyü",
+            line=dict(color="green", width=2.5),
+        )
+    )
+
+    # Benchmark ekleme (Eğer SPY veya başka bir varlık varsa)
+    benchmark_ticker = "SPY" if "SPY" in raw_price_df.columns else raw_price_df.columns[0]
+    if benchmark_ticker in raw_price_df.columns:
+        bench_cum = (
+            raw_price_df[benchmark_ticker]
+            / raw_price_df[benchmark_ticker].iloc[0]
+        ) * (budget * kelly_size)
+        fig_backtest.add_trace(
+            go.Scatter(
+                x=bench_cum.index,
+                y=bench_cum.values,
+                mode="lines",
+                name=f"Benchmark ({benchmark_ticker})",
+                line=dict(color="gray", width=1.5, dash="dash"),
+            )
+        )
+
+    fig_backtest.update_layout(
+        title="Kümülatif Portföy Getiri Eğrisi",
+        xaxis_title="Tarih",
+        yaxis_title=f"Portföy Değeri ({curr_symbol})",
+    )
+    st.plotly_chart(fig_backtest, use_container_width=True)
+
+# YENİ EKLENEN SEKME 6: Stres Testi (Kriz Senaryoları)
+with q_tab6:
+    st.subheader("⚡ Portföy Kriz Stres Testi (Stress Testing)")
+    st.write(
+        "Piyasada ani şoklar (Örn: Borsa Çöküşü, Kur Şoku, Savaş veya Likidite Krizi) yaşanması durumunda portföyün maruz kalacağı tahmini kayıp."
+    )
+
+    col_s1, col_s2, col_s3 = st.columns(3)
+
+    # Senaryo 1: Genel Piyasa %20 Düşüşü
+    shock_market = -0.20
+    portfolio_shock_loss = shock_market * port_beta * (budget * kelly_size)
+
+    # Senaryo 2: Faizlerin Ani 500 Baz Puan Artışı
+    shock_rate = -0.08 * (budget * kelly_size)
+
+    # Senaryo 3: Döviz / Kur Krizi (Eğer USD bazlı varlıklar varsa pozitif etkilenme)
+    shock_fx = (
+        0.15 * sum(optimal_weights[t] for t in returns_df.columns if not t.endswith(".IS"))
+        * (budget * kelly_size)
+    )
+
+    col_s1.metric(
+        "Şok Senaryosu: Global Crash (%20)",
+        f"{curr_symbol}{portfolio_shock_loss:,.2f}",
+        delta=f"%{shock_market*port_beta*100:.1f}",
+        delta_color="inverse",
+    )
+    col_s2.metric(
+        "Şok Senaryosu: Faiz Şoku (+500 bps)",
+        f"{curr_symbol}{shock_rate:,.2f}",
+        delta="% -8.0",
+        delta_color="inverse",
+    )
+    col_s3.metric(
+        "Şok Senaryosu: Kur / FX Şoku",
+        f"{curr_symbol}{shock_fx:,.2f}",
+        delta=f"+%{shock_fx/(budget*kelly_size)*100:.1f}",
+    )
+
+st.divider()
+
+# ==========================================
+# 6. RAPOR DIŞA AKTARIMI (CSV & EXCEL)
+# ==========================================
+st.subheader("📥 Raporu Dışa Aktar")
+
+col_dl1, col_dl2 = st.columns(2)
+
+with col_dl1:
+    csv_data = asset_df.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📄 Varlık Dağılımını CSV Olarak İndir",
+        data=csv_data,
+        file_name="quant_portfoy_dagilimi.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+with col_dl2:
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+        asset_df.to_excel(writer, sheet_name="Optimum_Dagilim", index=False)
+        alloc_df.to_excel(writer, sheet_name="Kategoriler", index=False)
+    excel_data = output.getvalue()
+    st.download_button(
+        label="📊 Detaylı Raporu Excel Olarak İndir",
+        data=excel_data,
+        file_name="quant_portfoy_detayli_rapor.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+    )
