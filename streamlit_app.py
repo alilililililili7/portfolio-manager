@@ -53,7 +53,7 @@ st.markdown(
     }
 </style>
 """,
-    unsafe_allow_allowed_html=True,
+    unsafe_allow_html=True,
 )
 
 # ==============================================================================
@@ -585,7 +585,7 @@ class PortfolioAnalytics:
 
 
 # ==============================================================================
-# 10. VISUALIZATION ENGINE (SEABORN-FREE)
+# 10. VISUALIZATION ENGINE
 # ==============================================================================
 
 
@@ -707,11 +707,11 @@ class QuantTerminalVisualizer:
 def main():
     st.markdown(
         '<div class="main-title">🚀 Quantamental Portföy Optimizasyon Terminali</div>',
-        unsafe_allow_allowed_html=True,
+        unsafe_allow_html=True,
     )
     st.markdown(
         '<div class="sub-title">Çok varlıklı (Hisse, ETF, Emtia, Gayrimenkul) Cantillon & Quant-based Portföy Mimarisi</div>',
-        unsafe_allow_allowed_html=True,
+        unsafe_allow_html=True,
     )
 
     if len(TARGET_TICKERS) < 2:
@@ -811,7 +811,7 @@ def main():
         analytics_summary=analytics_summary,
     )
 
-    # Ek Analiz: Matplotlib Tabanlı Korelasyon Isı Haritası (Seaborn gerektirmez)
+    # Ek Analiz: Matplotlib Tabanlı Korelasyon Isı Haritası
     with st.expander("🔍 Varlık Korelasyon Matrisini İncele"):
         corr_matrix = returns_dataframe.corr().values
         fig_corr, ax_corr = plt.subplots(figsize=(10, 6))
