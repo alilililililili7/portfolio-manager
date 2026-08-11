@@ -117,7 +117,7 @@ def build_hybrid_cov_matrix(returns_df):
 def run_ornstein_uhlenbeck(
     initial_rate, target_rate=None, theta=0.15, sigma=0.01, days=252, N=50
 ):
-    """Girdiye tam bağlı dinamik Ornstein-Uhlenbeck / Vasicek Faiz Simülasyonu."""
+    """Ornstein-Uhlenbeck / Vasicek Faiz Görselleştirme Simülasyonu."""
     if target_rate is None:
         target_rate = initial_rate
 
@@ -151,7 +151,9 @@ def apply_ebitda_margin_penalty(
 
 def calculate_portfolio_beta(weights, asset_betas):
     """Portföyün toplam piyasa duyarlılığını (Beta) hesaplar."""
-    return sum(weights[ticker] * asset_betas.get(ticker, 1.0) for ticker in weights.index)
+    return sum(
+        weights[ticker] * asset_betas.get(ticker, 1.0) for ticker in weights.index
+    )
 
 
 def calculate_fractional_kelly(
@@ -172,7 +174,7 @@ def calculate_master_integrated_opt(
     max_asset_cap=0.25,
     max_bist_cap=0.50,
 ):
-    """GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz + EBITDA Cezalandırması + DCF Blend."""
+    """GARCH + EWMA + Mean-CVaR + Birebir Rf Kullanımı + EBITDA Penalty + DCF Blend."""
     raw_mean_returns = returns_df.mean() * 252
     num_assets = len(raw_mean_returns)
 
@@ -181,11 +183,13 @@ def calculate_master_integrated_opt(
     if dcf_potentials is None:
         dcf_potentials = raw_mean_returns.to_dict()
 
-    # 1. OU Dinamik Faiz Entegrasyonu (Kullanıcının Seçtiği Faize Sadık)
+    # 1. BİREBİR KULLANICININ GİRDİĞİ FAİZ ALINIR
+    effective_rf = float(base_rf)
+
+    # OU Simülasyonu Sadece Grafik/Görsel Sekme İçin Çalıştırılır
     ou_sim = run_ornstein_uhlenbeck(
         initial_rate=base_rf, target_rate=base_rf, days=252, N=50
     )
-    effective_rf = float(np.mean(ou_sim))
 
     # 2. DCF + Quant (Black-Litterman Benzeri) Getiri Harmanlama
     blended_returns = {}
@@ -442,7 +446,7 @@ if returns_df.empty or len(returns_df.columns) < 2:
     )
     st.stop()
 
-# EBITDA, DCF & Beta Mock/Hesaplama Matrisleri (Geliştirilebilir Data-Feed)
+# EBITDA, DCF & Beta Matrisleri
 ebitda_margins = {
     t: 0.08 if "BIMAS" in t else (0.12 if "EREGL" in t else 0.25)
     for t in returns_df.columns
@@ -453,7 +457,7 @@ asset_betas = {
     for t in returns_df.columns
 }
 
-# HEPSİ BİR ARADA MASTER OPTİMİZASYON
+# MASTER OPTİMİZASYON
 (
     optimal_weights,
     hybrid_cov_df,
@@ -483,8 +487,8 @@ kelly_size = calculate_fractional_kelly(
 
 st.info(
     f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
-    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + OU Dinamik Faiz + EBITDA Penalty + DCF) | "
-    f"**Simüle Dinamik $R_f$:** **%{effective_rf*100:.2f}** | "
+    f"**Model:** Entegre Quantamental (GARCH + EWMA + Mean-CVaR + EBITDA Penalty + DCF) | "
+    f"**$R_f$:** **%{effective_rf*100:.2f}** | "
     f"**Tek Varlık / BİST Sınırı:** %{max_asset_cap*100:.0f} / %{max_bist_cap*100:.0f}"
 )
 
@@ -773,10 +777,9 @@ with q_tab3:
 # SEKMELER 4: Ornstein-Uhlenbeck / Vasicek
 with q_tab4:
     st.write(
-        "**Ornstein-Uhlenbeck / Vasicek Mean-Reverting Faiz Simülasyonu:**"
+        "**Ornstein-Uhlenbeck / Vasicek Mean-Reverting Faiz Görselleştirme Simülasyonu:**"
     )
 
-    # Kullanıcının seçtiği ve girdiği faiz direkt hedef alınır
     ou_paths = run_ornstein_uhlenbeck(
         initial_rate=base_rf,
         target_rate=base_rf,
