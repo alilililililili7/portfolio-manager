@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 from scipy.stats import norm
-import seaborn as sns
 import streamlit as st
 
 # Yahoo Finance entegrasyonu (Gerçek veri çekimi için)
@@ -586,7 +585,7 @@ class PortfolioAnalytics:
 
 
 # ==============================================================================
-# 10. VISUALIZATION ENGINE
+# 10. VISUALIZATION ENGINE (SEABORN-FREE)
 # ==============================================================================
 
 
@@ -812,17 +811,30 @@ def main():
         analytics_summary=analytics_summary,
     )
 
-    # Ek Analiz: Korelasyon Isı Haritası
+    # Ek Analiz: Matplotlib Tabanlı Korelasyon Isı Haritası (Seaborn gerektirmez)
     with st.expander("🔍 Varlık Korelasyon Matrisini İncele"):
-        fig_corr, ax_corr = plt.subplots(figsize=(10, 5))
-        sns.heatmap(
-            returns_dataframe.corr(),
-            annot=True,
-            fmt=".2f",
-            cmap="coolwarm",
-            ax=ax_corr,
-            cbar=True,
-        )
+        corr_matrix = returns_dataframe.corr().values
+        fig_corr, ax_corr = plt.subplots(figsize=(10, 6))
+        cax = ax_corr.matshow(corr_matrix, cmap="coolwarm")
+        fig_corr.colorbar(cax)
+
+        ticks = np.arange(0, len(returns_dataframe.columns), 1)
+        ax_corr.set_xticks(ticks)
+        ax_corr.set_yticks(ticks)
+        ax_corr.set_xticklabels(returns_dataframe.columns, rotation=45, ha="left")
+        ax_corr.set_yticklabels(returns_dataframe.columns)
+
+        for i in range(len(returns_dataframe.columns)):
+            for j in range(len(returns_dataframe.columns)):
+                ax_corr.text(
+                    j,
+                    i,
+                    f"{corr_matrix[i, j]:.2f}",
+                    ha="center",
+                    va="center",
+                    color="black",
+                )
+
         st.pyplot(fig_corr)
 
 
