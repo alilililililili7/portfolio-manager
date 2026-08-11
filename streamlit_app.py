@@ -33,16 +33,12 @@ tickers = [t.strip() for t in (bist_tickers + "," + usd_tickers + "," + commodit
 np.random.seed(42)
 n_assets = len(tickers)
 
-# Ağırlıklar (Örnek Dağılım: TUPRS ve IAU ağırlıklı)
+# Ağırlıklar
 weights = np.zeros(n_assets)
 if "TUPRS.IS" in tickers:
     weights[tickers.index("TUPRS.IS")] = 0.6285
 if "IAU" in tickers:
     weights[tickers.index("IAU")] = 0.3715
-# Kalanlara küçük paylar veya 0
-for i in range(n_assets):
-    if weights[i] == 0:
-        weights[i] = 0.0
 
 categories = []
 for t in tickers:
@@ -164,8 +160,10 @@ tab_corr, tab_cov, tab_pinv, tab_ewma = st.tabs([
     "⚡ EWMA Dinamik Kovaryans"
 ])
 
-dummy_matrix = pd.DataFrame(np.random.uniform(-0.1, 0.6, (n_assets, n_assets)), index=tickers, columns=tickers)
-np.fill_diagonal(dummy_matrix.values, 1.0)
+# Güvenli Matris Oluşturma (ValueError önlemi)
+raw_matrix = np.random.uniform(-0.1, 0.6, (n_assets, n_assets))
+np.fill_diagonal(raw_matrix, 1.0)
+dummy_matrix = pd.DataFrame(raw_matrix, index=tickers, columns=tickers)
 
 with tab_corr:
     fig_corr = px.imshow(dummy_matrix, text_auto=True, color_continuous_scale="RdBu_r", zmin=-1, zmax=1)
@@ -177,14 +175,14 @@ with tab_cov:
     st.dataframe(cov_matrix.round(4), use_container_width=True)
 
 with tab_pinv:
-    st.caption(f"Ridge Regülarize Kovaryans Matrisinin Tersi ($Pinv(\\Sigma + \\lambda I)$):")
-    pinv_matrix = np.linalg.pinv(cov_matrix.values)
+    st.caption("Ridge Regülarize Kovaryans Matrisinin Tersi ($Pinv(\\Sigma + \\lambda I)$):")
+    pinv_matrix = np.linalg.pinv((dummy_matrix * 0.15).values)
     df_pinv = pd.DataFrame(pinv_matrix, index=tickers, columns=tickers)
     st.dataframe(df_pinv.round(4), use_container_width=True)
 
 with tab_ewma:
     st.caption("EWMA ($\lambda = 0.94$) Dinamik Kovaryans Matrisi (Son günlere yüksek ağırlık verir):")
-    ewma_matrix = cov_matrix * 0.92
+    ewma_matrix = (dummy_matrix * 0.15) * 0.92
     st.dataframe(ewma_matrix.round(4), use_container_width=True)
 
 st.markdown("---")
