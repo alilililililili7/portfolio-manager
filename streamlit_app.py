@@ -38,7 +38,6 @@ class FinancialDataIngestor:
         self.end_date = end_date
 
     def fetch_historical_returns(self, seed=42):
-        """Korelasyon matrisine bağlı günlük logaritmik getiri matrisi üretir/çeker."""
         np.random.seed(seed)
         dates = pd.date_range(
             start=self.start_date, end=self.end_date, freq="B"
@@ -67,7 +66,6 @@ class FinancialDataIngestor:
         return returns_df
 
     def fetch_fundamental_metrics(self):
-        """Bilanço, Gelir Tablosu ve Çarpan verilerini üretime hazır dict formatında döndürür."""
         np.random.seed(101)
         pe_ratios = {}
         pb_ratios = {}
@@ -420,8 +418,6 @@ def calculate_master_integrated_opt(
 
 
 class PortfolioAnalytics:
-    """Optimizasyon çıktılarından performans, VaR, Max Drawdown ve Beta hesaplar."""
-
     def __init__(self, weights, returns_df, cov_df, rf):
         self.weights = weights
         self.returns_df = returns_df
@@ -464,7 +460,7 @@ class PortfolioAnalytics:
 
 
 # ==============================================================================
-# 9. ADVANCED GRAPHICS & VISUALIZATION ENGINE (DÜZELTİLDİ VE ENTEGRE EDİLDİ)
+# 9. ADVANCED GRAPHICS & VISUALIZATION ENGINE (İSTEDİĞİN DÜZELTİLMİŞ KISIM)
 # ==============================================================================
 
 
@@ -584,12 +580,12 @@ class QuantTerminalVisualizer:
             fontweight="bold",
         )
 
-        # Streamlit ve Standalone (Konsol) Uyumlu Çıktı
+        # Streamlit ve Standart Çalıştırma Desteği
         try:
             import streamlit as st
 
             st.pyplot(fig)
-        except ImportError:
+        except (ImportError, Exception):
             plt.show()
 
 
@@ -599,8 +595,6 @@ class QuantTerminalVisualizer:
 
 
 class QuantTerminalReporter:
-    """Konsola profesyonel finansal rapor bastıran modül."""
-
     @staticmethod
     def print_full_executive_report(
         weights,
@@ -621,12 +615,6 @@ class QuantTerminalReporter:
         bist_w = weights[weights.index.str.endswith(".IS")].sum() * 100
         us_w = 100.0 - bist_w
 
-        print("\n" + "=" * 80)
-        print(
-            " 🚀 KURUMSAL QUANTAMENTAL PORTFÖY OPTİMİZASYON TERMINALI RAPORU 🚀"
-        )
-        print("=" * 80)
-
         df_summary = pd.DataFrame(
             {
                 "Ağırlık (%)": (weights * 100).round(2),
@@ -642,47 +630,52 @@ class QuantTerminalReporter:
             }
         )
 
-        print(df_summary.to_string())
-        print("-" * 80)
+        # Streamlit Varsa Arayüze Bas, Yoksa Terminal Konsoluna
+        try:
+            import streamlit as st
 
-        print(f"📊 PORFÖY GENEL PERFORMANS METRİKLERİ:")
-        print(
-            f" 🟢 Yıllıklandırılmış Beklenen Getiri (Blended Return) : %{p_ret * 100:.2f}"
-        )
-        print(
-            f" 🔴 Yıllıklandırılmış Hibrit Volatilite               : %{p_vol * 100:.2f}"
-        )
-        print(
-            f" ⚡ Entegre Sharpe Oranı (Efektif Rf: %{rf*100:.1f})      : {sharpe:.3f}"
-        )
-        print(
-            f" 🛡️  Yıllık %95 Value at Risk (VaR)                      : %{var_95 * 100:.2f}"
-        )
-        print(
-            f" ⚠️  Yıllık %95 Conditional VaR (CVaR / Tail Loss)       : %{cvar_95 * 100:.2f}"
-        )
-        print(
-            f" 📉 Maksimum Tarihsel Düşüş (Max Drawdown)              : %{max_dd * 100:.2f}"
-        )
-        print(
-            f" 🧩 Herfindahl-Hirschman Çeşitlendirme Skoru (HHI)      : {hhi:.4f}"
-        )
-        print("-" * 80)
-        print(f"🌍 BÖLGE VE VARLIK DAĞILIMI:")
-        print(f" 🇹🇷 Borsa İstanbul (BIST) Toplam Ağırlığı               : %{bist_w:.2f}")
-        print(f" 🇺🇸 Global / ABD Borsaları Toplam Ağırlığı              : %{us_w:.2f}")
-        print("=" * 80 + "\n")
+            st.title("🚀 Quantamental Portföy Optimizasyon Terminali")
+            st.dataframe(df_summary)
+
+            col1, col2, col3 = st.columns(3)
+            col1.metric("Beklenen Getiri", f"%{p_ret * 100:.2f}")
+            col2.metric("Portföy Volatilitesi", f"%{p_vol * 100:.2f}")
+            col3.metric("Entegre Sharpe", f"{sharpe:.3f}")
+
+            col4, col5, col6 = st.columns(3)
+            col4.metric("Yıllık VaR (%95)", f"%{var_95 * 100:.2f}")
+            col5.metric("Yıllık CVaR (%95)", f"%{cvar_95 * 100:.2f}")
+            col6.metric("Max Drawdown", f"%{max_dd * 100:.2f}")
+
+        except (ImportError, Exception):
+            print("\n" + "=" * 80)
+            print(
+                " 🚀 KURUMSAL QUANTAMENTAL PORTFÖY OPTİMİZASYON TERMINALI RAPORU 🚀"
+            )
+            print("=" * 80)
+            print(df_summary.to_string())
+            print("-" * 80)
+            print(f"📊 PORFÖY GENEL PERFORMANS METRİKLERİ:")
+            print(f" 🟢 Yıllıklandırılmış Beklenen Getiri: %{p_ret * 100:.2f}")
+            print(f" 🔴 Yıllıklandırılmış Volatilite    : %{p_vol * 100:.2f}")
+            print(f" ⚡ Entegre Sharpe Oranı            : {sharpe:.3f}")
+            print(f" 🛡️  Yıllık %95 VaR                 : %{var_95 * 100:.2f}")
+            print(f" ⚠️  Yıllık %95 CVaR                : %{cvar_95 * 100:.2f}")
+            print(f" 📉 Maksimum Düşüş (Max DD)         : %{max_dd * 100:.2f}")
+            print(f" 🧩 HHI Çeşitlendirme Skoru         : {hhi:.4f}")
+            print("-" * 80)
+            print(f"🌍 BÖLGE DAĞILIMI:")
+            print(f" 🇹🇷 BIST Toplam Ağırlığı            : %{bist_w:.2f}")
+            print(f" 🇺🇸 ABD Toplam Ağırlığı             : %{us_w:.2f}")
+            print("=" * 80 + "\n")
 
 
 # ==============================================================================
-# 11. MAIN ENTRY POINT & SYSTEM EXECUTION
+# 11. MAIN ENGINE RUNNER (HEM CONSOLE HEM STREAMLIT UYUMLU)
 # ==============================================================================
 
-if __name__ == "__main__":
-    print(
-        "⚡ Quantamental Portfolio Terminal Başlatılıyor... Veriler Hazırlanıyor..."
-    )
 
+def run_pipeline():
     target_tickers = [
         "THYAO.IS",
         "GARAN.IS",
@@ -700,8 +693,6 @@ if __name__ == "__main__":
     )
     returns_dataframe = ingestor.fetch_historical_returns()
     fundamentals = ingestor.fetch_fundamental_metrics()
-
-    print("⚙️  GARCH/EWMA Kovaryans ve SLSQP Optimizasyon Motoru Çalıştırılıyor...")
 
     (
         opt_weights,
@@ -743,7 +734,6 @@ if __name__ == "__main__":
         "volatility": analytics.calculate_annualized_volatility(),
     }
 
-    print("📈 Gösterge Paneli Çizdiriliyor...")
     QuantTerminalVisualizer.plot_portfolio_dashboard(
         weights=opt_weights,
         cov_df=hybrid_cov,
@@ -752,3 +742,7 @@ if __name__ == "__main__":
         ou_paths=ou_paths,
         analytics_summary=analytics_summary,
     )
+
+
+if __name__ == "__main__":
+    run_pipeline()
