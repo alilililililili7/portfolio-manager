@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 import scipy.stats as stats
 import streamlit as st
 import yfinance as yf
+from scipy.linalg import pinv
 
 # ARCH/GARCH Modülü (Kurulu değilse fallback çalışır)
 try:
@@ -23,25 +24,46 @@ st.set_page_config(
 # ==========================================
 
 
+# ==========================================
+# 1. YARDIMCI VE KANTİTATİF FONKSİYONLAR (GÜNCELLENDİ)
+# ==========================================
+
+
 def fetch_data(tickers, period="3y"):
-    """YFinance üzerinden kapanış verilerini çeker."""
+    """YFinance üzerinden kapanış verilerini çeker ve eksikleri tam temizler."""
     if not tickers:
         return pd.DataFrame()
     data = yf.download(tickers, period=period, progress=False)["Close"]
     if isinstance(data, pd.Series):
         data = data.to_frame()
+
+    # Tam temizlik: Eksik verileri doldur ve Inf değerleri temizle
     data = data.dropna(how="all").ffill().bfill()
-    return data
+    returns = data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
+    return returns
 
 
 def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
-    """Analitik Sharpe Optimizasyonu & Kovaryans Tersi (MPT Core)."""
+    """SVD did not converge hatasını engelleyen Robust Sharpe Optimizasyonu."""
     mean_returns = returns_df.mean() * 252
     cov_matrix = returns_df.cov() * 252
 
-    # Kovaryans Tersi (Pinv)
-    cov_inv = np.linalg.pinv(cov_matrix.values)
-    ones = np.ones(len(mean_returns))
+    cov_values = cov_matrix.values
+
+    # 1. Temizlik: NaN/Inf varsa 0 ile değiştir
+    cov_values = np.nan_to_num(cov_values, nan=0.0, posinf=0.0, neginf=0.0)
+
+    # 2. Diagonal Jitter (SVD tıkanmasını %100 engelleyen sayısal kararlılık)
+    cov_values += np.eye(cov_values.shape[0]) * 1e-6
+
+    # 3. Scipy Pinverse (SVD patlamaz)
+    try:
+        cov_inv = pinv(cov_values)
+    except Exception:
+        # Ekstra güvenlik önlemi
+        cov_inv = np.linalg.pinv(
+            cov_values + np.eye(cov_values.shape[0]) * 1e-4
+        )
 
     # Excess Returns
     excess_returns = mean_returns.values - risk_free_rate
@@ -49,9 +71,13 @@ def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
     # Analytical Unconstrained Weights
     raw_weights = np.dot(cov_inv, excess_returns)
 
-    # Sıfırdan küçükleri engelle & Normalize et (Long-Only constraint)
-    raw_weights = np.maximum(raw_weights, 0.025)  # Min %2.5 taban
-    weights = raw_weights / np.sum(raw_weights)
+    # Eğer tüm ağırlıklar negatif veya 0 çıkarsa eşit ağırlık ver
+    if np.all(raw_weights <= 0) or np.isnan(raw_weights).any():
+        weights = np.ones(len(mean_returns)) / len(mean_returns)
+    else:
+        # Sıfırdan küçükleri engelle & Normalize et
+        raw_weights = np.maximum(raw_weights, 0.025)  # Min %2.5 taban
+        weights = raw_weights / np.sum(raw_weights)
 
     return pd.Series(weights, index=returns_df.columns), cov_matrix
 
