@@ -9,3 +9,4 @@ arch
 matplotlib
 seaborn
 xlsxwriter
+google-generativeai
