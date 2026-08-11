@@ -17,7 +17,7 @@ except ImportError:
     ARCH_AVAILABLE = False
 
 st.set_page_config(
-    page_title="Simetrik Multi-Currency Portföy Engine",
+    page_title="Gelişmiş Multi-Currency Portföy Engine",
     layout="wide",
     page_icon="🏛️",
 )
@@ -55,120 +55,20 @@ def fetch_and_convert_data(tickers, base_currency="TRY (₺)", period="3y"):
         is_bist_asset = col.endswith(".IS")
 
         if base_currency.startswith("TRY"):
-            # === BAZ PARA BİRİMİ: TL ===
             if is_bist_asset or usd_try is None:
-                # Zaten TL varlığı, dönüşüm yok
                 converted_data[col] = data[col]
             else:
-                # Dolar varlığını TL'ye çevir: Fiyat_USD * USDTRY
                 converted_data[col] = data[col] * usd_try
         else:
-            # === BAZ PARA BİRİMİ: USD ===
             if is_bist_asset and usd_try is not None:
-                # TL varlığını USD'ye çevir: Fiyat_TL * (1 / USDTRY) => Fiyat_TL / USDTRY
                 converted_data[col] = data[col] / usd_try
             else:
-                # Zaten USD varlığı, dönüşüm yok
                 converted_data[col] = data[col]
 
     returns = (
         converted_data.pct_change().replace([np.inf, -np.inf], np.nan).dropna()
     )
     return returns
-
-
-def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
-    """
-    Scipy Minimize tabanlı, L2 Regularization destekli ve
-    Eksi Sharpe durumunda Min-Volatility Moduna geçen Kararlı Optimizasyon Engine.
-    """
-    mean_returns = returns_df.mean() * 252
-    cov_matrix = returns_df.cov() * 252
-    num_assets = len(mean_returns)
-
-    # Ridge / L2 Regularization (Kovaryans Matrisi Tekilliğini Engeller)
-    lambda_ridge = 1e-4
-    cov_values = cov_matrix.values + np.eye(num_assets) * lambda_ridge
-
-    def portfolio_performance(weights):
-        portfolio_return = np.dot(weights, mean_returns)
-        portfolio_vol = np.sqrt(
-            np.dot(weights.T, np.dot(cov_values, weights))
-        )
-        return portfolio_return, portfolio_vol
-
-    def negative_sharpe(weights):
-        p_ret, p_vol = portfolio_performance(weights)
-        if p_vol == 0:
-            return 1e6
-        return -(p_ret - risk_free_rate) / p_vol
-
-    def min_volatility(weights):
-        _, p_vol = portfolio_performance(weights)
-        return p_vol
-
-    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
-    bounds = tuple((0.0, 1.0) for _ in range(num_assets))
-    initial_weights = np.ones(num_assets) / num_assets
-
-    opt_sharpe = minimize(
-        negative_sharpe,
-        initial_weights,
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-    )
-
-    opt_w = opt_sharpe.x
-    best_ret, _ = portfolio_performance(opt_w)
-
-    # Fallback Control (Beklenen Getiri < Risksiz Faiz ise Min-Vol Modu)
-    is_fallback = False
-    if best_ret < risk_free_rate:
-        is_fallback = True
-        opt_min_vol = minimize(
-            min_volatility,
-            initial_weights,
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-        )
-        opt_w = opt_min_vol.x
-
-    opt_w = np.maximum(opt_w, 0.0)
-    opt_w = opt_w / np.sum(opt_w)
-
-    cov_df = pd.DataFrame(
-        cov_values, index=returns_df.columns, columns=returns_df.columns
-    )
-    return pd.Series(opt_w, index=returns_df.columns), cov_df, is_fallback
-
-
-def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
-    """VaR, CVaR, Skewness, Kurtosis ve Sharpe analizi."""
-    port_daily_returns = returns_df.dot(weights)
-
-    skewness = stats.skew(port_daily_returns)
-    kurtosis = stats.kurtosis(port_daily_returns)
-
-    var_95 = np.percentile(port_daily_returns, 5)
-    cvar_tail = port_daily_returns[port_daily_returns <= var_95]
-    cvar_95 = cvar_tail.mean() if len(cvar_tail) > 0 else var_95
-
-    ann_return = port_daily_returns.mean() * 252
-    ann_vol = port_daily_returns.std() * np.sqrt(252)
-    sharpe = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else 0
-
-    return {
-        "Ann_Return": ann_return,
-        "Ann_Vol": ann_vol,
-        "Sharpe": sharpe,
-        "Skewness": skewness,
-        "Kurtosis": kurtosis,
-        "VaR_95_Daily": abs(var_95),
-        "CVaR_95_Daily": abs(cvar_95),
-        "Daily_Returns": port_daily_returns,
-    }
 
 
 def calculate_ewma_cov(returns_df, lambda_param=0.94):
@@ -202,6 +102,159 @@ def run_garch_volatility(returns_series):
         return returns_series.std() * np.sqrt(252)
 
 
+def build_garch_cov_matrix(returns_df):
+    """GARCH ileri volatiliteleri ile Korelasyon matrisinden Kovaryans matrisi üretir."""
+    corr = returns_df.corr().values
+    garch_vols = [run_garch_volatility(returns_df[col]) for col in returns_df.columns]
+    D = np.diag(garch_vols)
+    garch_cov = D @ corr @ D
+    return pd.DataFrame(garch_cov, index=returns_df.columns, columns=returns_df.columns)
+
+
+def run_ornstein_uhlenbeck(initial_rate, target_rate=0.35, theta=0.15, sigma=0.04, days=252, N=100):
+    """Faiz Oranı Mean-Reversion Simülasyonu."""
+    dt = 1 / days
+    rates = np.zeros((days, N))
+    rates[0, :] = initial_rate
+
+    for t in range(1, days):
+        dr = (
+            theta * (target_rate - rates[t - 1, :]) * dt
+            + sigma * np.sqrt(dt) * np.random.normal(size=N)
+        )
+        rates[t, :] = rates[t - 1, :] + dr
+
+    return rates
+
+
+def calculate_advanced_portfolio_opt(
+    returns_df,
+    risk_free_rate=0.45,
+    method="Klasik Sharpe (MPT)",
+    max_asset_weight=1.0,
+    max_bist_weight=1.0,
+    use_ewma=False,
+):
+    """Gelişmiş Optimizasyon Engine: Sharpe, GARCH-Sharpe, Mean-CVaR, Risk Parity ve Kısıtlamalar."""
+    mean_returns = returns_df.mean() * 252
+    num_assets = len(mean_returns)
+
+    # Kovaryans Matrisi Seçimi
+    if method == "GARCH-Sharpe":
+        cov_matrix = build_garch_cov_matrix(returns_df)
+    elif use_ewma:
+        cov_matrix = calculate_ewma_cov(returns_df)
+    else:
+        cov_matrix = returns_df.cov() * 252
+
+    lambda_ridge = 1e-4
+    cov_values = cov_matrix.values + np.eye(num_assets) * lambda_ridge
+
+    # Kısıtlar (Constraints)
+    constraints = [{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}]
+
+    # BİST Toplam Limit Kısıtı
+    bist_indices = [i for i, col in enumerate(returns_df.columns) if col.endswith(".IS")]
+    if bist_indices and max_bist_weight < 1.0:
+        constraints.append({
+            "type": "ineq",
+            "fun": lambda w, idx=bist_indices, max_w=max_bist_weight: max_w - np.sum(w[idx])
+        })
+
+    # Sınırlar (Bounds - Tekil Varlık Sınırı)
+    bounds = tuple((0.0, float(max_asset_weight)) for _ in range(num_assets))
+    initial_weights = np.ones(num_assets) / num_assets
+
+    # A) Sharpe Optimizasyonu
+    if method in ["Klasik Sharpe (MPT)", "GARCH-Sharpe"]:
+        def negative_sharpe(weights):
+            p_ret = np.dot(weights, mean_returns)
+            p_vol = np.sqrt(np.dot(weights.T, np.dot(cov_values, weights)))
+            if p_vol == 0:
+                return 1e6
+            return -(p_ret - risk_free_rate) / p_vol
+
+        opt_res = minimize(
+            negative_sharpe,
+            initial_weights,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+        opt_w = opt_res.x
+
+    # B) Mean-CVaR (Tail Risk) Optimizasyonu
+    elif method == "Mean-CVaR (Tail Risk)":
+        def negative_mean_cvar(weights):
+            port_daily = returns_df.dot(weights)
+            var_95 = np.percentile(port_daily, 5)
+            cvar = abs(port_daily[port_daily <= var_95].mean())
+            ann_ret = np.dot(weights, mean_returns)
+            if cvar == 0:
+                return 1e6
+            return -(ann_ret - risk_free_rate) / (cvar * np.sqrt(252))
+
+        opt_res = minimize(
+            negative_mean_cvar,
+            initial_weights,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+        opt_w = opt_res.x
+
+    # C) Risk Paritesi (Risk Parity)
+    elif method == "Risk Paritesi (Risk Parity)":
+        def risk_budget_objective(weights):
+            portfolio_vol = np.sqrt(np.dot(weights.T, np.dot(cov_values, weights)))
+            marginal_risk = np.dot(cov_values, weights) / portfolio_vol
+            risk_contribution = weights * marginal_risk
+            target_risk = portfolio_vol / num_assets
+            return np.sum((risk_contribution - target_risk) ** 2)
+
+        opt_res = minimize(
+            risk_budget_objective,
+            initial_weights,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+        opt_w = opt_res.x
+
+    opt_w = np.maximum(opt_w, 0.0)
+    opt_w = opt_w / np.sum(opt_w)
+
+    cov_df = pd.DataFrame(cov_values, index=returns_df.columns, columns=returns_df.columns)
+    return pd.Series(opt_w, index=returns_df.columns), cov_df
+
+
+def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
+    """VaR, CVaR, Skewness, Kurtosis ve Sharpe analizi."""
+    port_daily_returns = returns_df.dot(weights)
+
+    skewness = stats.skew(port_daily_returns)
+    kurtosis = stats.kurtosis(port_daily_returns)
+
+    var_95 = np.percentile(port_daily_returns, 5)
+    cvar_tail = port_daily_returns[port_daily_returns <= var_95]
+    cvar_95 = cvar_tail.mean() if len(cvar_tail) > 0 else var_95
+
+    ann_return = port_daily_returns.mean() * 252
+    ann_vol = port_daily_returns.std() * np.sqrt(252)
+    sharpe = (ann_return - risk_free_rate) / ann_vol if ann_vol != 0 else 0
+
+    return {
+        "Ann_Return": ann_return,
+        "Ann_Vol": ann_vol,
+        "Sharpe": sharpe,
+        "Skewness": skewness,
+        "Kurtosis": kurtosis,
+        "VaR_95_Daily": abs(var_95),
+        "CVaR_95_Daily": abs(cvar_95),
+        "Daily_Returns": port_daily_returns,
+    }
+
+
 def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=500):
     """Cholesky Ayrıştırması ile GBM Monte Carlo Simülasyonu."""
     port_returns = returns_df.dot(weights)
@@ -229,26 +282,8 @@ def run_monte_carlo_gbm(returns_df, weights, initial_budget, days=252, N=500):
     return simulation_paths
 
 
-def run_ornstein_uhlenbeck(
-    initial_rate, target_rate=0.35, theta=0.1, sigma=0.05, days=252, N=100
-):
-    """Faiz Oranı Mean-Reversion Simülasyonu."""
-    dt = 1 / days
-    rates = np.zeros((days, N))
-    rates[0, :] = initial_rate
-
-    for t in range(1, days):
-        dr = (
-            theta * (target_rate - rates[t - 1, :]) * dt
-            + sigma * np.sqrt(dt) * np.random.normal(size=N)
-        )
-        rates[t, :] = rates[t - 1, :] + dr
-
-    return rates
-
-
 # ==========================================
-# 2. SIDEBAR (VARLIK VE DİNANİK FAİZ GİRDİLERİ)
+# 2. SIDEBAR (VARLIK, MODEL VE KISIT GİRDİLERİ)
 # ==========================================
 st.sidebar.title("💰 Baz Para Birimi & Bütçe")
 
@@ -277,9 +312,49 @@ rf_usd_input = (
 )
 
 # Seçilen Baz Para Birimine Göre Aktif Risksiz Faiz
-effective_rf = rf_tl_input if "TRY" in base_currency else rf_usd_input
+base_rf = rf_tl_input if "TRY" in base_currency else rf_usd_input
 
-st.sidebar.title("🎯 Varlık Seçimleri")
+# Ornstein-Uhlenbeck (OU) Dinamik Faiz Hesabı Entegrasyonu
+use_ou_rf = st.sidebar.checkbox("🔄 OU Mean-Reverting Dinamik Faiz Kullan", value=True)
+if use_ou_rf:
+    target_rf_sim = 0.35 if "TRY" in base_currency else 0.035
+    ou_sim = run_ornstein_uhlenbeck(initial_rate=base_rf, target_rate=target_rf_sim, days=252, N=50)
+    effective_rf = float(np.mean(ou_sim))
+    st.sidebar.caption(f"💡 Simüle Edilen Dinamik $R_f$: **%{effective_rf*100:.2f}**")
+else:
+    effective_rf = base_rf
+
+st.sidebar.title("🎯 Optimizasyon Modu & Kısıtlar")
+
+opt_method = st.sidebar.selectbox(
+    "Optimizasyon Yöntemi",
+    [
+        "Klasik Sharpe (MPT)",
+        "GARCH-Sharpe",
+        "Mean-CVaR (Tail Risk)",
+        "Risk Paritesi (Risk Parity)",
+    ],
+)
+
+use_ewma_cov = st.sidebar.checkbox("⚡ EWMA Dinamik Kovaryans Matrisi Kullan", value=False)
+
+max_asset_cap = st.sidebar.slider(
+    "Maks. Tekil Varlık Limiti (%)",
+    min_value=10,
+    max_value=100,
+    value=25,
+    step=5,
+) / 100.0
+
+max_bist_cap = st.sidebar.slider(
+    "Maks. BİST Toplam Limiti (%)",
+    min_value=10,
+    max_value=100,
+    value=50,
+    step=5,
+) / 100.0
+
+st.sidebar.title("🏛️ Varlık Seçimleri")
 
 use_stocks = st.sidebar.checkbox("📈 BİST Hisseleri (TL)", value=True)
 stock_tickers_input = st.sidebar.text_input(
@@ -293,15 +368,27 @@ etf_tickers_input = st.sidebar.text_input("ABD Varlıkları", "SPY, VOO")
 use_commodities = st.sidebar.checkbox("🥇 Emtialar (USD)", value=True)
 commodity_tickers_input = st.sidebar.text_input("Emtialar", "IAU, CPER")
 
+# YENİ EKLENEN: EMLAK VE KİRA SERTİFİKASI (SUKUK) CHECKBOX'LARI
+use_realty = st.sidebar.checkbox("🏢 Emlak / Gayrimenkul (TL)", value=True)
+realty_tickers_input = st.sidebar.text_input("Emlak Hisseleri / GYO", "EKGYO.IS, SNGYO.IS")
+
+use_sukuk = st.sidebar.checkbox("📜 Kira Sertifikası / Sukuk (TL)", value=True)
+sukuk_tickers_input = st.sidebar.text_input("Kira Sertifikası / Katılım", "KUVVA.IS")
+
 selected_tickers = []
 if use_stocks and stock_tickers_input:
-    selected_tickers.extend([t.strip() for t in stock_tickers_input.split(",")])
+    selected_tickers.extend([t.strip() for t in stock_tickers_input.split(",") if t.strip()])
 if use_etfs and etf_tickers_input:
-    selected_tickers.extend([t.strip() for t in etf_tickers_input.split(",")])
+    selected_tickers.extend([t.strip() for t in etf_tickers_input.split(",") if t.strip()])
 if use_commodities and commodity_tickers_input:
-    selected_tickers.extend(
-        [t.strip() for t in commodity_tickers_input.split(",")]
-    )
+    selected_tickers.extend([t.strip() for t in commodity_tickers_input.split(",") if t.strip()])
+if use_realty and realty_tickers_input:
+    selected_tickers.extend([t.strip() for t in realty_tickers_input.split(",") if t.strip()])
+if use_sukuk and sukuk_tickers_input:
+    selected_tickers.extend([t.strip() for t in sukuk_tickers_input.split(",") if t.strip()])
+
+st.sidebar.divider()
+run_opt_btn = st.sidebar.button("🚀 Portföyü Optimize Et / Hesapla", type="primary", use_container_width=True)
 
 # ==========================================
 # 3. ANA SAYFA VE HESAPLAMA MOTORU
@@ -324,9 +411,15 @@ if returns_df.empty or len(returns_df.columns) < 2:
     st.stop()
 
 # Optimizasyon ve Metrikler
-optimal_weights, sample_cov, is_fallback = calculate_mpt_weights(
-    returns_df, risk_free_rate=effective_rf
+optimal_weights, sample_cov = calculate_advanced_portfolio_opt(
+    returns_df,
+    risk_free_rate=effective_rf,
+    method=opt_method,
+    max_asset_weight=max_asset_cap,
+    max_bist_weight=max_bist_cap,
+    use_ewma=use_ewma_cov,
 )
+
 metrics = calculate_advanced_metrics(
     returns_df, optimal_weights, risk_free_rate=effective_rf
 )
@@ -340,19 +433,10 @@ conversion_info = (
 
 st.info(
     f"🌐 **Aktif Baz Para Birimi:** **{base_currency.split(' ')[0]}** | "
-    f"**Kur Mantığı:** {conversion_info} | "
-    f"**Modeldeki Risksiz Faiz ($R_f$):** **%{effective_rf*100:.2f}**"
+    f"**Model Yöntemi:** `{opt_method}` | "
+    f"**Modeldeki Risksiz Faiz ($R_f$):** **%{effective_rf*100:.2f}** | "
+    f"**Maks Tek Varlık / BİST Sınırı:** %{max_asset_cap*100:.0f} / %{max_bist_cap*100:.0f}"
 )
-
-# Fallback Uyarısı
-if is_fallback:
-    st.error(
-        f"⚠️ **UYARI: Negatif Sharpe Oranı / Yetersiz Risk Primi!**\n\n"
-        f"Seçilen varlık sepetinin beklenen getiri potansiyeli (**%{metrics['Ann_Return']*100:.2f}**), "
-        f"seçilen baz para biriminin risksiz faiz oranının (**%{effective_rf*100:.2f}**) altında kalmaktadır.\n\n"
-        f"Max Sharpe portföyü oluşturulamadığı için sistem otomatik olarak **Minimum Volatilite (Minimum Risk)** "
-        f"moduna düşürülmüştür."
-    )
 
 # ==========================================
 # 1. GENİŞ PORTFÖY ÖZETLERİ
@@ -375,8 +459,15 @@ col_left, col_right = st.columns([1.2, 1])
 with col_left:
     st.subheader("📋 2. Sektör & Kategori Bazlı Dağılım")
     categories = []
+    realty_list = [t.strip() for t in realty_tickers_input.split(",")]
+    sukuk_list = [t.strip() for t in sukuk_tickers_input.split(",")]
+
     for ticker in optimal_weights.index:
-        if ".IS" in ticker:
+        if ticker in realty_list or "EKGYO" in ticker or "GYO" in ticker:
+            categories.append("Emlak / Gayrimenkul (TL)")
+        elif ticker in sukuk_list:
+            categories.append("Kira Sertifikası / Sukuk (TL)")
+        elif ticker.endswith(".IS"):
             categories.append("Hisse (BİST / TL)")
         elif ticker in ["SPY", "VOO"]:
             categories.append("ETF (ABD / USD)")
@@ -449,12 +540,13 @@ st.divider()
 # ==========================================
 st.subheader("🧮 4. Korelasyon & Kovaryans Matrisleri")
 
-tab_corr, tab_cov, tab_pinv, tab_ewma = st.tabs(
+tab_corr, tab_cov, tab_pinv, tab_ewma, tab_garch_cov = st.tabs(
     [
         "🔗 Korelasyon Matrisi",
-        "📐 Kovaryans Matrisi (Ridge Regülarize)",
+        "📐 Kovaryans Matrisi (Aktif)",
         "🔄 Ters Kovaryans Matrisi (Pinv)",
         "⚡ EWMA Dinamik Kovaryans",
+        "📈 GARCH İleri Kovaryans Matrisi",
     ]
 )
 
@@ -488,6 +580,13 @@ with tab_ewma:
     )
     ewma_cov = calculate_ewma_cov(returns_df)
     st.dataframe(ewma_cov.round(4), use_container_width=True)
+
+with tab_garch_cov:
+    st.write(
+        "**GARCH(1,1) İleri Volatiliteler ile Oluşturulmuş Kovaryans Matrisi ($\Sigma_{GARCH}$):**"
+    )
+    garch_cov_df = build_garch_cov_matrix(returns_df)
+    st.dataframe(garch_cov_df.round(4), use_container_width=True)
 
 st.divider()
 
@@ -631,7 +730,7 @@ with q_tab4:
     target_rate_sim = 0.30 if "TRY" in base_currency else 0.035
 
     ou_paths = run_ornstein_uhlenbeck(
-        initial_rate=effective_rf,
+        initial_rate=base_rf,
         target_rate=target_rate_sim,
         theta=0.15,
         sigma=0.04,
