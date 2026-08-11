@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from scipy.linalg import pinv
+from scipy.optimize import minimize
 import scipy.stats as stats
 import streamlit as st
 import yfinance as yf
@@ -39,38 +40,82 @@ def fetch_data(tickers, period="3y"):
 
 
 def calculate_mpt_weights(returns_df, risk_free_rate=0.45):
-    """SVD did not converge hatasını engelleyen Robust Sharpe Optimizasyonu."""
+    """
+    Scipy Minimize tabanlı, L2 Regularization destekli ve
+    Eksi Sharpe durumunda Min-Volatility Moduna geçen Kararlı Optimizasyon Engine.
+    """
     mean_returns = returns_df.mean() * 252
     cov_matrix = returns_df.cov() * 252
+    num_assets = len(mean_returns)
 
-    cov_values = cov_matrix.values
-    cov_values = np.nan_to_num(cov_values, nan=0.0, posinf=0.0, neginf=0.0)
+    # 1. Ridge/L2 Regülarizasyonu (Collinearity & Multicollinearity Çözümü)
+    # SPY - VOO gibi tam korelasyonlu varlıklarda matris tekilliğini engeller.
+    lambda_ridge = 1e-4
+    cov_values = (
+        cov_matrix.values + np.eye(num_assets) * lambda_ridge
+    )  # Sigma + lambda * I
 
-    # Diagonal Jitter (SVD tıkanmasını %100 engelleyen sayısal kararlılık)
-    cov_values += np.eye(cov_values.shape[0]) * 1e-6
-
-    try:
-        cov_inv = pinv(cov_values)
-    except Exception:
-        cov_inv = np.linalg.pinv(
-            cov_values + np.eye(cov_values.shape[0]) * 1e-4
+    def portfolio_performance(weights):
+        portfolio_return = np.dot(weights, mean_returns)
+        portfolio_vol = np.sqrt(
+            np.dot(weights.T, np.dot(cov_values, weights))
         )
+        return portfolio_return, portfolio_vol
 
-    # Excess Returns
-    excess_returns = mean_returns.values - risk_free_rate
+    # Maksimum Sharpe Hedef Fonksiyonu
+    def negative_sharpe(weights):
+        p_ret, p_vol = portfolio_performance(weights)
+        if p_vol == 0:
+            return 1e6
+        return -(p_ret - risk_free_rate) / p_vol
 
-    # Analytical Unconstrained Weights
-    raw_weights = np.dot(cov_inv, excess_returns)
+    # Minimum Volatilite Hedef Fonksiyonu (Fallback Modu İçin)
+    def min_volatility(weights):
+        _, p_vol = portfolio_performance(weights)
+        return p_vol
 
-    # Eğer tüm ağırlıklar negatif veya 0 çıkarsa eşit ağırlık ver
-    if np.all(raw_weights <= 0) or np.isnan(raw_weights).any():
-        weights = np.ones(len(mean_returns)) / len(mean_returns)
-    else:
-        # Sıfırdan küçükleri engelle & Normalize et
-        raw_weights = np.maximum(raw_weights, 0.025)  # Min %2.5 taban
-        weights = raw_weights / np.sum(raw_weights)
+    # Optimizasyon Kısıtları & Sınırları
+    constraints = {"type": "eq", "fun": lambda w: np.sum(w) - 1.0}
+    bounds = tuple((0.0, 1.0) for _ in range(num_assets))
+    initial_weights = np.ones(num_assets) / num_assets
 
-    return pd.Series(weights, index=returns_df.columns), cov_matrix
+    # 2. Max Sharpe Optimizasyonu
+    opt_sharpe = minimize(
+        negative_sharpe,
+        initial_weights,
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+    )
+
+    opt_w = opt_sharpe.x
+    best_ret, _ = portfolio_performance(opt_w)
+
+    # 3. Fallback Control: Eğer Beklenen Getiri < Risksiz Faiz ise Min-Volatility Moduna Geç
+    is_fallback = False
+    if best_ret < risk_free_rate:
+        is_fallback = True
+        opt_min_vol = minimize(
+            min_volatility,
+            initial_weights,
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+        )
+        opt_w = opt_min_vol.x
+
+    # Temizlik: Negatif gürültüleri sıfırla ve yeniden normalize et
+    opt_w = np.maximum(opt_w, 0.0)
+    opt_w = opt_w / np.sum(opt_w)
+
+    cov_df = pd.DataFrame(
+        cov_values, index=returns_df.columns, columns=returns_df.columns
+    )
+    return (
+        pd.Series(opt_w, index=returns_df.columns),
+        cov_df,
+        is_fallback,
+    )
 
 
 def calculate_advanced_metrics(returns_df, weights, risk_free_rate=0.45):
@@ -193,7 +238,10 @@ currency = st.sidebar.selectbox(
 curr_symbol = "₺" if "TRY" in currency else "$"
 
 budget = st.sidebar.number_input(
-    f"Toplam Bütçe ({curr_symbol})", min_value=1000.0, value=100000.0, step=5000.0
+    f"Toplam Bütçe ({curr_symbol})",
+    min_value=1000.0,
+    value=100000.0,
+    step=5000.0,
 )
 
 st.sidebar.title("🎯 Varlık Seçimleri")
@@ -250,7 +298,7 @@ if len(selected_tickers) < 2:
     )
     st.stop()
 
-# Veri Çekme (returns_df doğrudan günlük getirilerdir!)
+# Veri Çekme
 returns_df = fetch_data(selected_tickers)
 
 if returns_df.empty or len(returns_df.columns) < 2:
@@ -260,7 +308,7 @@ if returns_df.empty or len(returns_df.columns) < 2:
     st.stop()
 
 # 1. MPT Ağırlık ve Kovaryans Tersi
-optimal_weights, sample_cov = calculate_mpt_weights(
+optimal_weights, sample_cov, is_fallback = calculate_mpt_weights(
     returns_df, risk_free_rate=rf_rate_annual
 )
 
@@ -268,6 +316,16 @@ optimal_weights, sample_cov = calculate_mpt_weights(
 metrics = calculate_advanced_metrics(
     returns_df, optimal_weights, risk_free_rate=rf_rate_annual
 )
+
+# FALLBACK UYARISI (Eksi Sharpe Koruması)
+if is_fallback:
+    st.error(
+        f"⚠️ **UYARI: Negatif Sharpe Oranı / Yetersiz Risk Primi!**\n\n"
+        f"Seçilen varlık sepetinin beklenen getiri potansiyeli (**%{metrics['Ann_Return']*100:.2f}**), "
+        f"risksiz faiz oranının (**%{rf_rate_annual*100:.2f}**) altında kalmaktadır.\n\n"
+        f"Max Sharpe portföyü oluşturulamadığı için sistem otomatik olarak **Minimum Volatilite (Minimum Risk)** "
+        f"moduna düşürülmüştür. Rasyonel finansal karar açısından sermayeyi faiz/mevduat veya risksiz araçlarda değerlendirmek daha avantajlı olabilir."
+    )
 
 # ==========================================
 # 1. GENİŞ PORTFÖY ÖZETLERİ
@@ -365,7 +423,7 @@ st.subheader("🧮 4. Korelasyon & Kovaryans Matrisleri")
 tab_corr, tab_cov, tab_pinv, tab_ewma = st.tabs(
     [
         "🔗 Korelasyon Matrisi",
-        "📐 Kovaryans Matrisi",
+        "📐 Kovaryans Matrisi (Ridge Regülarize)",
         "🔄 Ters Kovaryans Matrisi (Pinv)",
         "⚡ EWMA Dinamik Kovaryans",
     ]
@@ -386,7 +444,7 @@ with tab_cov:
 
 with tab_pinv:
     st.write(
-        "**Analitik Sharpe Optimizasyonunda kullanılan $Pinv(\\Sigma)$ Matrisi:**"
+        "**Ridge Regülarize Kovaryans Matrisinin Tersi ($Pinv(\\Sigma + \\lambda I)$):**"
     )
     pinv_matrix = pd.DataFrame(
         pinv(sample_cov.values),
